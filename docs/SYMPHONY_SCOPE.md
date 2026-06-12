@@ -1,11 +1,25 @@
 # Harness Symphony Revised Scope
 
-Status: proposed replacement scope
+Status: proposed replacement scope (revision 2)
 
 Audience: `repository-harness` maintainers, Harness CLI implementers, and
 coding-agent runtime integrators.
 
-Supersedes: the broader Symphony proposal from PR #16.
+Supersedes: the broader Symphony proposal from PR #16 and revision 1 of this
+document.
+
+Revision 2 changes:
+
+- Changesets become the primary record (an operation log written by
+  `harness-cli` as it executes), not a derived diff of two SQLite files.
+- `harness.db` becomes a rebuildable local index over committed changesets.
+- Per-PR manual reconciliation is replaced by an idempotent `sync` command.
+- `HARNESS_DB_PATH` support in `harness-cli` is a hard prerequisite (v0).
+- Changesets must be rendered human-readable in the run summary.
+- Run ceremony is lane-aware; tiny-lane work gets a lightweight path.
+- The standalone queue milestone is removed; a single active-run lock is
+  enough until real concurrency arrives.
+- Committed run artifacts get an explicit retention policy.
 
 ## 1. Product Thesis
 
@@ -22,8 +36,9 @@ Harness story
   -> copied harness.db
   -> explicit agent run contract
   -> validation/result artifact
+  -> committed changeset (operation log)
   -> optional PR
-  -> explicit post-merge reconciliation
+  -> idempotent sync after merge
 ```
 
 This is narrower than OpenAI Symphony. OpenAI Symphony makes an issue tracker
@@ -51,7 +66,7 @@ Harness workflow, but the repository does not provide a repeatable way to:
 - hand an agent a precise run contract
 - capture run outcome in machine-readable form
 - preserve useful artifacts for review
-- reconcile durable state only after human acceptance
+- update durable state only after human acceptance
 
 Harness Symphony should fill that gap.
 
@@ -81,7 +96,7 @@ Symphony owns:
 - run status and logs
 - run result collection
 - optional PR creation
-- post-merge reconciliation support
+- post-merge sync support
 
 ### 3.2 The First Version Optimizes Trust, Not Throughput
 
@@ -91,24 +106,77 @@ that humans and agents can understand.
 Throughput features such as auto-polling, external work sources, multiple
 active agents, and CI repair should wait until the local run contract is proven.
 
-### 3.3 Committed Artifacts Are The Team Surface
+### 3.3 Committed Changesets Are The Source Of Truth
 
-`harness.db` is local operational state. It is not the collaboration surface.
+This is the keystone principle of revision 2.
 
-The reviewable collaboration surface should be committed artifacts:
+`harness.db` is a local index, not the source of truth. The source of truth is
+the ordered set of committed changesets under `.harness/changesets/`.
 
-- run summaries
+Consequences:
+
+- `harness-cli` appends each durable operation to the run's changeset as it
+  executes. The changeset is an operation log, not a diff.
+- Symphony never diffs SQLite files to produce a changeset.
+- Any clone can rebuild `harness.db` by replaying committed changesets:
+
+  ```bash
+  harness-cli db rebuild --from .harness/changesets
+  ```
+
+- Post-merge reconciliation collapses into an idempotent replay of
+  committed-but-unapplied changesets (`harness-symphony sync`, see 4.10).
+- Multiple team members can land Symphony PRs without coordinating around a
+  single machine's `harness.db`.
+
+This removes the riskiest parts of the previous scope: base-checksum
+validation, per-PR reconcile bookkeeping, and `reconciliation_failed` repair
+flows that depended on diffing database states.
+
+### 3.4 Committed Artifacts Are The Team Surface
+
+The reviewable collaboration surface is committed artifacts:
+
+- run summaries (with a human-readable changeset rendering)
 - run results
 - semantic Harness changesets
 - docs, stories, decisions, tests, and product changes
 
-Long term, `harness.db` should be rebuildable from committed Harness artifacts
-and changesets. Treating the local database as the only source of truth makes
-team use brittle.
+`harness.db` itself is never committed and never reviewed.
+
+### 3.5 Ceremony Must Match The Risk Lane
+
+Harness already classifies work into `tiny`, `normal`, and `high_risk` lanes.
+Symphony must not impose the full worktree + contract + result + changeset +
+sync loop on work the harness itself calls tiny.
+
+- `normal` and `high_risk` lanes: full isolated-run loop.
+- `tiny` lane: a lightweight path is allowed (see 4.11).
+
+If users experience Symphony as bureaucracy around small tasks, they will stop
+using it for large ones.
 
 ## 4. Revised v1 Scope
 
 v1 is a safe on-demand runner.
+
+### v0 Prerequisite: harness-cli Database Path And Operation Log
+
+Two `harness-cli` capabilities are hard prerequisites and must land before any
+Symphony code:
+
+1. `harness-cli` must respect `HARNESS_DB_PATH`. Without this, copied-database
+   isolation does not exist and every other guarantee in this document is
+   fiction.
+2. `harness-cli` must support an operation-log mode: when `HARNESS_RUN_ID` is
+   set, every durable write is also appended as a semantic operation to
+
+   ```text
+   .harness/changesets/<run_id>.changeset.jsonl
+   ```
+
+   in the workspace. The log is written transactionally with the database
+   write: either both happen or neither does.
 
 ### Required v1 Capabilities
 
@@ -125,8 +193,9 @@ Checks:
 - Git is available.
 - Git worktrees are supported.
 - repository root is discoverable.
-- `harness.db` exists or can be initialized.
-- `harness-cli` exists or has a documented install/build path.
+- `harness.db` exists or can be rebuilt from committed changesets.
+- `harness-cli` exists, supports `HARNESS_DB_PATH`, and supports the
+  operation log.
 - `.gitignore` protects local DB and Symphony runtime files.
 - configured agent adapter exists.
 - configured PR adapter is available only if PR creation is enabled.
@@ -178,7 +247,6 @@ Creates:
 ```text
 .symphony/worktrees/<run_id>/
 .symphony/runs/<run_id>/RUN_CONTRACT.json
-.symphony/runs/<run_id>/harness.base.db
 ```
 
 The root working tree is never used as the agent workspace.
@@ -192,8 +260,9 @@ HARNESS_RUN_ID=<run_id>
 HARNESS_RUN_MODE=execute
 ```
 
-`harness-cli` should learn to respect `HARNESS_DB_PATH` before Symphony depends
-on copied database isolation.
+With the operation log in place, no base database snapshot is required. The
+changeset accumulates inside the worktree as the agent works and is committed
+with the rest of the run artifacts.
 
 #### 4.4 Run Contract
 
@@ -227,6 +296,13 @@ Each run must have a machine-readable contract:
 
 This contract is for agents first and humans second. It should remove ambiguity
 about where the agent is allowed to work and what it must produce.
+
+In addition to the JSON file, Symphony must surface the same contract through
+the worktree's `AGENTS.md` shim. `AGENTS.md` is the entry point coding agents
+reliably read first; the run contract must be visible there, not only in a
+path the agent may never open. The shim insert should be a short block linking
+to `RUN_CONTRACT.json` and restating the assigned story, the database path,
+the required outputs, and the forbidden paths.
 
 #### 4.5 Agent Launch
 
@@ -281,7 +357,7 @@ Example:
     "crates/harness-cli/src/interface.rs"
   ],
   "summary_path": ".harness/runs/run_123/SUMMARY.md",
-  "harness_db_changed": true
+  "changeset_path": ".harness/changesets/run_123.changeset.jsonl"
 }
 ```
 
@@ -317,10 +393,11 @@ Shows:
 - status
 - result path
 - PR URL if created
-- reconciliation status
+- sync status (changeset applied locally or not)
 - next human action
 
-The CLI should make unreconciled merged PRs obvious.
+`harness-symphony status` must make committed-but-unapplied changesets obvious
+(see 4.10).
 
 #### 4.8 Optional PR Creation
 
@@ -347,21 +424,13 @@ If a PR is created, it must include:
 ```text
 .harness/runs/<run_id>/SUMMARY.md
 .harness/runs/<run_id>/RESULT.json
-```
-
-It may include:
-
-```text
 .harness/changesets/<run_id>.changeset.jsonl
 ```
 
-only after semantic changeset generation is implemented.
-
 #### 4.9 Semantic Changesets
 
-Raw SQLite diffs are not a good v1 review surface.
-
-Changesets should be semantic Harness operations:
+Changesets are semantic Harness operations, appended by `harness-cli` as the
+operations execute (see v0 prerequisite). Raw SQLite diffs are never used.
 
 ```jsonl
 {"op":"changeset.header","version":1,"run_id":"run_123","base_schema_version":4}
@@ -369,43 +438,108 @@ Changesets should be semantic Harness operations:
 {"op":"trace.add","payload":{"story_id":"US-015","outcome":"completed"}}
 ```
 
-Each operation should be:
+Each operation must be:
 
 - stable
-- idempotent where possible
+- idempotent (replaying an applied changeset is a no-op)
 - schema-versioned
-- reviewable in PR
+- ordered within the changeset
 - applyable through `harness-cli`, not direct SQL
 
-v1 may defer changeset application until after the run contract and result
-protocol work.
+Because the log is written at execution time, operation intent and order are
+preserved exactly. There is no generation step to defer and no diffing
+algorithm to maintain.
 
-#### 4.10 Manual Reconciliation
+Human-readable rendering: raw JSONL is a hostile review surface. Symphony must
+render the changeset into a markdown section of `SUMMARY.md` (and therefore the
+PR body), for example:
 
-Command:
+```markdown
+## Harness Changes
 
-```bash
-harness-symphony reconcile <pr-number>
+| Operation    | Entity | Change                              |
+| ------------ | ------ | ----------------------------------- |
+| story.update | US-015 | status: planned -> in_progress      |
+| trace.add    | US-015 | outcome: completed                  |
+| decision.add | D-031  | "Use operation log for changesets"  |
 ```
 
-Preconditions:
+Reviewers approve the rendered table; the JSONL is the machine record.
 
-- PR exists.
-- PR is merged.
-- merge commit is present locally.
-- changeset exists if the run produced one.
-- run has not already been reconciled.
-- root `harness.db` schema is compatible.
+#### 4.10 Sync
 
-Reconciliation must not partially corrupt root `harness.db`.
-
-Longer term, add:
+There is no per-PR `reconcile <pr-number>` command. It is replaced by:
 
 ```bash
-harness-cli db rebuild --from .harness/changesets
+harness-symphony sync
 ```
 
-so a new clone can reconstruct durable Harness state from committed artifacts.
+Behavior:
+
+1. Scan `.harness/changesets/` on the current checkout (typically `main` after
+   pulling).
+2. Compare against the applied-changeset log in `.symphony/state.db` (and a
+   `changeset_applied` record inside `harness.db`).
+3. Replay every committed-but-unapplied changeset, in commit order, through
+   `harness-cli` in a single transaction per changeset.
+4. Record each applied changeset id.
+
+Properties:
+
+- Idempotent: running `sync` twice is safe; applied changesets are skipped.
+- Author-independent: it applies teammates' merged changesets, not only runs
+  started on this machine.
+- Clone-friendly: on a fresh clone, `sync` (or `harness-cli db rebuild`) can
+  reconstruct `harness.db` entirely from committed history.
+- Drift-resistant: `harness-symphony status` and `doctor` must warn when
+  committed changesets are unapplied, so a forgotten `sync` is loud, not
+  silent.
+
+A merged PR whose changeset has not been synced leaves root `harness.db`
+stale but never corrupted. A closed-unmerged PR requires no action at all: its
+changeset was never committed to `main`, so it is never applied.
+
+If applying an operation fails (schema mismatch, conflicting state), `sync`
+must stop at that changeset, leave the database transactionally intact, report
+the failing operation, and continue to be safe to re-run after repair.
+
+#### 4.11 Tiny-Lane Lightweight Path
+
+For stories the harness classifies as `tiny`, Symphony may offer:
+
+```bash
+harness-symphony run <story-id> --here
+```
+
+Behavior:
+
+- no worktree; the run executes in the current checkout
+- `HARNESS_DB_PATH` still points at a copied database in `.symphony/runs/`
+- the operation log, `RESULT.json`, and summary are still required
+- the run is flagged `lightweight` in run state and in the summary
+
+The database isolation and finish protocol are non-negotiable; only the
+worktree ceremony is waived. `--here` must refuse `normal` and `high_risk`
+stories.
+
+#### 4.12 Artifact Retention
+
+Committed run artifacts grow with every run. v1 must define retention up
+front:
+
+- `.harness/changesets/` is permanent history. It is the source of truth and
+  is never pruned.
+- `.harness/runs/<run_id>/` (summary, result) is kept by default, with a
+  compaction command:
+
+  ```bash
+  harness-symphony runs compact --keep-last <n>
+  ```
+
+  Compaction may fold old summaries into a single archive file or delete them,
+  but must never touch `.harness/changesets/`.
+- `.symphony/` runtime state (worktrees, logs, state db) is local, ignored,
+  and freely cleanable.
 
 ## 5. v1 Non-Goals
 
@@ -413,14 +547,16 @@ Do not include these in v1:
 
 - automatic work polling
 - multiple active runs
+- a run request queue (a single active-run lock is sufficient; see 7)
 - Linear, GitHub Issues, Jira, or external work-source adapters
 - hosted dashboard
-- webhook reconciliation
+- webhook-triggered sync
 - CI repair mode
 - review-comment repair mode
 - automatic PR merge
 - multi-agent planning
 - raw SQLite merge through Git
+- SQLite diffing of any kind
 
 These are future features after the local workbench is useful.
 
@@ -432,58 +568,42 @@ Required:
 
 - PR creation adapter
 - draft/open PR policy
-- semantic changeset generation
-- manual reconciliation
-- unreconciled PR detection
-- branch cleanup command
+- changeset rendering in PR body
+- `sync` hardening (conflict reporting, partial-failure recovery)
+- unapplied-changeset detection in `status` and `doctor`
+- branch and worktree cleanup command
+- `harness-cli db rebuild --from .harness/changesets`
 
 Commands:
 
 ```bash
 harness-symphony pr create <run_id>
 harness-symphony pr retry <run_id>
-harness-symphony reconcile <pr-number>
+harness-symphony sync
 harness-symphony status
 ```
 
 Acceptance:
 
 - a completed run can become a PR
-- a merged PR can update root `harness.db` through a semantic changeset
-- a closed-unmerged PR leaves root `harness.db` untouched
-- `status` shows unreconciled merged PRs
+- after merge and pull, `sync` updates root `harness.db` from the committed
+  changeset
+- a closed-unmerged PR requires no cleanup of durable state
+- `status` shows committed-but-unapplied changesets
+- a fresh clone can rebuild `harness.db` from committed changesets
 
-## 7. v3 Scope: Local Queue
+## 7. v3 Scope: Symphony-Style Automation
 
-Add only after PR/reconciliation works.
-
-Required:
-
-- run request queue
-- one active run lock
-- retry command
-- stale run detection
-- `prepare -> run -> finish -> optional PR` lifecycle through the queue
-
-Commands:
-
-```bash
-harness-symphony queue list
-harness-symphony queue cancel <request-id>
-harness-symphony runs retry <run-id>
-```
-
-Still no auto-mode by default.
-
-## 8. v4 Scope: Symphony-Style Automation
-
-This is where the project starts to resemble OpenAI Symphony.
+This is where the project starts to resemble OpenAI Symphony, and the first
+place a queue is justified.
 
 Required:
 
 - auto-mode
 - polling Harness work source
 - policy-driven eligibility
+- run request queue and retry semantics (introduced here, where concurrency
+  and unattended operation actually need them)
 - external work-source adapter interface
 - bounded concurrency if run isolation is proven
 
@@ -498,9 +618,13 @@ RemoteHarnessWorkSource
 ```
 
 The adapter boundary should not change run contracts, result files, workspace
-isolation, or reconciliation semantics.
+isolation, or sync semantics.
 
-## 9. Architecture Boundaries
+Until v3, the only scheduling primitive is a single active-run lock in
+`.symphony/state.db`. A queue for a tool that allows one run at a time is
+machinery without a customer.
+
+## 8. Architecture Boundaries
 
 Suggested crates:
 
@@ -513,8 +637,9 @@ crates/
 
   harness-cli/
     existing durable-layer CLI
-    semantic changeset commands
-    db rebuild commands
+    HARNESS_DB_PATH support
+    operation-log writing
+    changeset apply and rebuild commands
 
   harness-symphony/
     cli/
@@ -535,7 +660,7 @@ Do not split crates before the first implementation needs shared domain code.
 If the MVP can be implemented cleanly in one crate first, prefer the smaller
 change.
 
-## 10. Configuration
+## 9. Configuration
 
 Path:
 
@@ -574,15 +699,19 @@ pull_request:
     - partial
 
 changeset:
-  semantic: true
   directory: ".harness/changesets"
+  render_in_summary: true
+
+runs:
+  allow_here_for_tiny: true
+  compact_keep_last: 50
 
 cleanup:
   keep_failed_worktrees: true
-  cleanup_after_reconcile: false
+  cleanup_after_sync: false
 ```
 
-## 11. Git Ignore Requirements
+## 10. Git Ignore Requirements
 
 Must ignore:
 
@@ -590,10 +719,7 @@ Must ignore:
 harness.db
 harness.db-wal
 harness.db-shm
-.symphony/state.db
-.symphony/worktrees/
-.symphony/runs/*/harness.base.db
-.symphony/runs/*/logs/
+.symphony/
 ```
 
 Must not ignore:
@@ -604,9 +730,17 @@ Must not ignore:
 .harness/changesets/
 ```
 
-## 12. Acceptance Criteria
+## 11. Acceptance Criteria
 
-### 12.1 MVP Acceptance
+### 11.1 Prerequisite Acceptance
+
+Given `HARNESS_DB_PATH` points at a non-default database, every `harness-cli`
+durable command reads and writes that database only.
+
+Given `HARNESS_RUN_ID` is set, every `harness-cli` durable write appends a
+matching semantic operation to the run changeset, atomically with the write.
+
+### 11.2 MVP Acceptance
 
 Given an eligible story exists in `harness.db`, when a user runs:
 
@@ -619,12 +753,12 @@ then Symphony:
 1. refuses to use the root checkout as the run workspace
 2. creates a dedicated worktree
 3. copies `harness.db`
-4. records base DB metadata
-5. writes `RUN_CONTRACT.json`
-6. exports `HARNESS_DB_PATH` for the copied DB
+4. writes `RUN_CONTRACT.json`
+5. surfaces the run contract in the worktree `AGENTS.md` shim
+6. exports `HARNESS_DB_PATH`, `HARNESS_RUN_ID`, and `HARNESS_RUN_MODE`
 7. leaves root `harness.db` unchanged
 
-### 12.2 Agent Result Acceptance
+### 11.3 Agent Result Acceptance
 
 Given an agent run finishes, Symphony accepts the run only if:
 
@@ -634,29 +768,46 @@ Given an agent run finishes, Symphony accepts the run only if:
 4. required validation evidence is present or explicitly marked unavailable
 5. forbidden local runtime files are not staged for commit
 
-### 12.3 PR Acceptance
+### 11.4 PR Acceptance
 
 Given PR creation is enabled, Symphony:
 
-1. includes summary and result artifacts
-2. includes semantic changeset only if generated
+1. includes summary, result, and changeset artifacts
+2. renders the changeset as a markdown table in the summary and PR body
 3. does not include `harness.db`
-4. does not include `.symphony/state.db`
-5. does not include worktree files or DB snapshots
+4. does not include `.symphony/` files
 
-### 12.4 Reconciliation Acceptance
+### 11.5 Sync Acceptance
 
-Given a merged PR with a valid semantic changeset, Symphony:
+Given `main` contains merged changesets that are not yet applied locally, when
+the user runs:
 
-1. verifies the PR is merged
-2. verifies the changeset was not already applied
-3. applies operations transactionally through `harness-cli`
-4. marks the run reconciled
-5. reports manual repair steps on conflict
+```bash
+harness-symphony sync
+```
 
-## 13. Product Risks
+then Symphony:
 
-### 13.1 Too Much Ceremony
+1. detects all committed-but-unapplied changesets
+2. applies them in commit order, transactionally, through `harness-cli`
+3. records each applied changeset id
+4. is a no-op when run again
+5. on failure, leaves `harness.db` intact, reports the failing operation, and
+   remains safe to re-run
+
+Given a fresh clone with no `harness.db`, `harness-cli db rebuild` (or `sync`)
+reconstructs the database from committed changesets.
+
+### 11.6 Tiny-Lane Acceptance
+
+Given a `tiny`-lane story, `run --here` executes without a worktree but still
+uses a copied database, writes the operation log, and produces `RESULT.json`.
+
+Given a `normal` or `high_risk` story, `run --here` is refused.
+
+## 12. Product Risks
+
+### 12.1 Too Much Ceremony
 
 Risk: a user sees Symphony as bureaucracy around simple coding tasks.
 
@@ -665,19 +816,20 @@ Mitigation:
 - make `doctor`, `work list`, and `run --prepare-only` excellent
 - keep PR creation optional
 - default blocked/intake-only PRs to draft
+- provide the tiny-lane `--here` path
 
-### 13.2 Database State Confusion
+### 12.2 Database State Confusion
 
 Risk: users do not know whether `harness.db`, docs, or changesets are the source
 of truth.
 
 Mitigation:
 
-- document committed artifacts as team truth
-- make `harness.db` rebuildable
-- make unreconciled PRs visible
+- committed changesets are the source of truth, by definition (3.3)
+- `harness.db` is rebuildable and documented as an index
+- `status` and `doctor` surface unapplied changesets loudly
 
-### 13.3 Agent Adapter Lock-In
+### 12.3 Agent Adapter Lock-In
 
 Risk: a Harness-native tool becomes Codex-only.
 
@@ -687,35 +839,49 @@ Mitigation:
 - support custom command adapters in v1
 - keep agent protocol file-based where possible
 
-### 13.4 Changeset Complexity
+### 12.4 Operation-Log Drift
 
-Risk: semantic DB reconciliation consumes the whole project.
+Risk: the operation log and the database disagree because a write path bypassed
+the log.
 
 Mitigation:
 
-- defer apply/rebuild until run contracts work
-- start with append-only operations
-- avoid raw row-level SQLite diffs
+- all durable writes go through `harness-cli`; direct SQL is unsupported
+- log append and database write are transactional (v0 prerequisite)
+- `doctor` can verify that replaying changesets reproduces the current
+  database state
 
-## 14. Recommended Implementation Order
+### 12.5 Artifact Growth
 
-1. Add `harness-symphony doctor`.
-2. Add config loading and path normalization.
-3. Add run state store.
-4. Add worktree creation and copied DB wiring.
-5. Add `RUN_CONTRACT.json`.
-6. Add `RESULT.json` validation.
-7. Add custom command agent adapter.
-8. Add `runs list/show`.
-9. Add optional PR creation.
-10. Add semantic changeset generation.
-11. Add manual reconciliation.
-12. Add local queue.
-13. Add auto-mode.
-14. Add external work-source adapters.
+Risk: committed run artifacts bloat the repository over time.
 
-## 15. One-Sentence Positioning
+Mitigation:
+
+- retention policy and `runs compact` from v1 (4.12)
+- changesets stay permanent but are small, append-only JSONL
+
+## 13. Recommended Implementation Order
+
+1. Add `HARNESS_DB_PATH` support to `harness-cli`.
+2. Add operation-log writing to `harness-cli`.
+3. Add `harness-cli db changeset apply` (idempotent replay).
+4. Add `harness-symphony doctor`.
+5. Add config loading and path normalization.
+6. Add run state store with single active-run lock.
+7. Add worktree creation and copied DB wiring.
+8. Add `RUN_CONTRACT.json` and the `AGENTS.md` shim insert.
+9. Add `RESULT.json` validation.
+10. Add custom command agent adapter.
+11. Add `runs list/show` and `status`.
+12. Add changeset rendering in `SUMMARY.md`.
+13. Add optional PR creation.
+14. Add `harness-symphony sync`.
+15. Add `harness-cli db rebuild` and tiny-lane `--here`.
+16. Add auto-mode, queue, and external work-source adapters (v3).
+
+## 14. One-Sentence Positioning
 
 Harness Symphony is a safe agent workbench for turning Harness stories into
-isolated, reviewable runs; it can become a Symphony-style autonomous
-orchestrator only after that local loop is trusted.
+isolated, reviewable runs whose durable state lives in committed changesets; it
+can become a Symphony-style autonomous orchestrator only after that local loop
+is trusted.
