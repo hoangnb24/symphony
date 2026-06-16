@@ -21,6 +21,47 @@ pub struct WorkItem {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkCandidate {
+    pub story_id: String,
+    pub source: String,
+}
+
+pub trait WorkSource {
+    fn name(&self) -> &'static str;
+    fn poll(&self) -> Result<Vec<WorkCandidate>, WorkError>;
+}
+
+pub struct HarnessDbWorkSource<'a> {
+    db_path: &'a Path,
+}
+
+impl<'a> HarnessDbWorkSource<'a> {
+    pub fn new(db_path: &'a Path) -> Self {
+        Self { db_path }
+    }
+}
+
+impl WorkSource for HarnessDbWorkSource<'_> {
+    fn name(&self) -> &'static str {
+        "harness-db"
+    }
+
+    fn poll(&self) -> Result<Vec<WorkCandidate>, WorkError> {
+        Ok(list_work(self.db_path)?
+            .into_iter()
+            .filter(is_auto_eligible)
+            .map(|item| WorkCandidate {
+                story_id: item.id,
+                source: self.name().to_owned(),
+            })
+            .collect())
+    }
+}
+
+pub const EXTERNAL_WORK_SOURCE_BOUNDARIES: &[&str] =
+    &["github-issues", "linear", "jira", "remote-harness"];
+
 pub fn list_work(db_path: &Path) -> Result<Vec<WorkItem>, WorkError> {
     if !db_path.exists() {
         return Err(WorkError::MissingDatabase(db_path.display().to_string()));
@@ -66,6 +107,10 @@ fn classify(id: String, status: String, lane: String, verify_command: Option<Str
         runnable: runnable.to_owned(),
         reason: reason.to_owned(),
     }
+}
+
+fn is_auto_eligible(item: &WorkItem) -> bool {
+    item.runnable == "yes" && matches!(item.status.as_str(), "planned" | "in_progress")
 }
 
 #[cfg(test)]
@@ -145,5 +190,40 @@ mod tests {
         assert_eq!(items[1].runnable, "yes");
         assert_eq!(items[2].id, "US-WARN");
         assert_eq!(items[2].runnable, "warn");
+    }
+
+    #[test]
+    fn harness_db_work_source_polls_only_ready_stories() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("harness.db");
+        let connection = Connection::open(&db_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE story (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    risk_lane TEXT NOT NULL,
+                    verify_command TEXT
+                );
+                INSERT INTO story (id, status, risk_lane, verify_command)
+                VALUES
+                    ('US-READY', 'planned', 'normal', 'cargo test'),
+                    ('US-WARN', 'planned', 'normal', NULL),
+                    ('US-DONE', 'implemented', 'normal', 'true');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let source = HarnessDbWorkSource::new(&db_path);
+        let candidates = source.poll().unwrap();
+
+        assert_eq!(
+            candidates,
+            vec![WorkCandidate {
+                story_id: "US-READY".to_owned(),
+                source: "harness-db".to_owned(),
+            }]
+        );
+        assert!(EXTERNAL_WORK_SOURCE_BOUNDARIES.contains(&"github-issues"));
     }
 }

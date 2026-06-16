@@ -245,7 +245,18 @@ fn execute_prepared_run(
         });
     }
 
-    let completed = validate_finished_run(config, prepared)?;
+    let run_id = prepared.run_id.clone();
+    let completed = match validate_finished_run(config, prepared) {
+        Ok(completed) => completed,
+        Err(error) => {
+            RunStateStore::new(config.state_db.clone()).update_status(
+                &run_id,
+                "failed",
+                "inspect invalid run result",
+            )?;
+            return Err(error);
+        }
+    };
     RunStateStore::new(config.state_db.clone()).update_status(
         &completed.prepared.run_id,
         &completed.outcome,
@@ -620,6 +631,9 @@ mod tests {
             compact_keep_last: 50,
             keep_failed_worktrees: true,
             cleanup_after_sync: false,
+            auto_source: "harness-db".to_owned(),
+            auto_poll_interval_seconds: 30,
+            auto_max_attempts: 3,
         }
     }
 

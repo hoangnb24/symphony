@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 use thiserror::Error;
 
+use crate::auto::{options_from_config, run_auto_mode, AutoError, AutoRunSummary};
 use crate::config::{ConfigError, ResolvedConfig, SymphonyConfig};
 use crate::doctor::{print_report, run_doctor, DoctorError};
 use crate::pr::{create_pr, PrCreateResult, PrError};
@@ -39,6 +40,8 @@ enum Command {
     Runs(RunsArgs),
     /// Show local Symphony status.
     Status,
+    /// Run explicitly opted-in unattended work polling.
+    Auto(AutoArgs),
     /// Apply committed Harness changesets to local harness.db.
     Sync,
     /// Create or inspect pull requests for run artifacts.
@@ -69,6 +72,31 @@ struct RunArgs {
     /// Run a tiny-lane story in the current checkout with copied database isolation.
     #[arg(long)]
     here: bool,
+}
+
+#[derive(Args, Debug)]
+struct AutoArgs {
+    /// Required opt-in flag for unattended work polling.
+    #[arg(long)]
+    enable: bool,
+    /// Poll once and exit after processing at most one queued item.
+    #[arg(long)]
+    once: bool,
+    /// Work source adapter to poll. US-045 implements harness-db first.
+    #[arg(long)]
+    source: Option<String>,
+    /// Maximum completed or permanently failed queued items before exit.
+    #[arg(long)]
+    max_runs: Option<u32>,
+    /// Retry attempts per story before marking the queue item failed.
+    #[arg(long)]
+    max_attempts: Option<u32>,
+    /// Seconds to wait between idle polls.
+    #[arg(long)]
+    poll_interval_seconds: Option<u64>,
+    /// Exit after this many idle polls. Omit for long-running mode.
+    #[arg(long)]
+    max_idle_cycles: Option<u32>,
 }
 
 #[derive(Args, Debug)]
@@ -145,6 +173,8 @@ pub enum InterfaceError {
     Retention(#[from] RetentionError),
     #[error("{0}")]
     Pr(#[from] PrError),
+    #[error("{0}")]
+    Auto(#[from] AutoError),
     #[error("could not determine current directory: {0}")]
     CurrentDir(std::io::Error),
 }
@@ -204,6 +234,25 @@ pub fn run(cli: Cli) -> Result<(), InterfaceError> {
             }
         },
         Command::Sync => print_sync_result(&sync_changesets(&resolved)?),
+        Command::Auto(args) => {
+            let mut options = options_from_config(&resolved);
+            options.enabled = args.enable;
+            options.once = args.once;
+            if let Some(source) = args.source {
+                options.source = source;
+            }
+            if let Some(max_runs) = args.max_runs {
+                options.max_runs = Some(max_runs);
+            }
+            if let Some(max_attempts) = args.max_attempts {
+                options.max_attempts = max_attempts;
+            }
+            if let Some(poll_interval_seconds) = args.poll_interval_seconds {
+                options.poll_interval_seconds = poll_interval_seconds;
+            }
+            options.max_idle_cycles = args.max_idle_cycles;
+            print_auto_result(&run_auto_mode(&resolved, options)?);
+        }
         Command::Status => print_status(
             &RunStateStore::new(resolved.state_db.clone()).active_run()?,
             &unapplied_changesets(&resolved)?,
@@ -262,6 +311,12 @@ fn print_config(config: &ResolvedConfig) {
     println!("compact_keep_last: {}", config.compact_keep_last);
     println!("keep_failed_worktrees: {}", config.keep_failed_worktrees);
     println!("cleanup_after_sync: {}", config.cleanup_after_sync);
+    println!("auto_source: {}", config.auto_source);
+    println!(
+        "auto_poll_interval_seconds: {}",
+        config.auto_poll_interval_seconds
+    );
+    println!("auto_max_attempts: {}", config.auto_max_attempts);
 }
 
 fn print_prepared_run(run: &PreparedRun) {
@@ -417,6 +472,15 @@ fn print_pr_result(result: &PrCreateResult) {
     }
 }
 
+fn print_auto_result(result: &AutoRunSummary) {
+    println!("Auto mode stopped: {}", result.stopped_reason);
+    println!("Source: {}", result.source);
+    println!("Enqueued: {}", result.enqueued);
+    println!("Completed: {}", result.completed);
+    println!("Failed: {}", result.failed);
+    println!("Idle cycles: {}", result.idle_cycles);
+}
+
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let mut widths = headers
         .iter()
@@ -468,6 +532,7 @@ mod tests {
         assert!(help.contains("run"));
         assert!(help.contains("runs"));
         assert!(help.contains("status"));
+        assert!(help.contains("auto"));
         assert!(help.contains("sync"));
         assert!(help.contains("pr"));
         assert!(help.contains("config"));

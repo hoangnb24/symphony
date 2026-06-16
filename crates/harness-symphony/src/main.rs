@@ -1,3 +1,4 @@
+mod auto;
 mod changeset;
 mod config;
 mod doctor;

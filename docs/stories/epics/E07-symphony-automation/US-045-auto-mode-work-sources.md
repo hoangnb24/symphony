@@ -2,7 +2,7 @@
 
 ## Status
 
-planned
+implemented
 
 ## Lane
 
@@ -53,5 +53,25 @@ after the local workbench.
 
 ## Evidence
 
-Add validation output after implementation.
-
+- Implemented `harness-symphony auto --enable` as the explicit opt-in entrypoint
+  for unattended polling.
+- Added auto config defaults for `source: harness-db`, `poll_interval_seconds`,
+  and `max_attempts`.
+- Added `HarnessDbWorkSource` as the first work-source adapter; GitHub Issues,
+  Linear, Jira, and remote Harness are recognized as future adapter boundaries
+  without changing run contracts.
+- Added `.symphony/state.db` queue records with attempts, retry limit, terminal
+  completion/failure state, and last error/run metadata.
+- Auto mode reuses existing `execute_run`, isolated worktrees, `RUN_CONTRACT`,
+  `RESULT.json`, changeset rendering, and run state updates.
+- Unit proof: `cargo test -p harness-symphony` passed with 39 tests covering
+  opt-in enforcement, adapter boundaries, queue attempts, retry, and
+  `HarnessDbWorkSource` filtering.
+- Integration/E2E proof: temp git repo smoke used `HarnessDbWorkSource` to feed
+  `US-AUTO` into one queued isolated run with a fake agent; output reported
+  `Enqueued: 1`, `Completed: 1`, `Failed: 0`, and `runs list` showed the run
+  `completed`.
+- Platform proof: idle long-running poll smoke exited cleanly via
+  `--max-idle-cycles 1` with `Auto mode stopped: max idle cycles reached`.
+- Release proof: `cargo test --workspace`, `cargo fmt --check`, and
+  `cargo clippy --workspace -- -D warnings` passed.

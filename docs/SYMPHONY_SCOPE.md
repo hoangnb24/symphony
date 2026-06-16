@@ -620,9 +620,22 @@ RemoteHarnessWorkSource
 The adapter boundary should not change run contracts, result files, workspace
 isolation, or sync semantics.
 
-Until v3, the only scheduling primitive is a single active-run lock in
-`.symphony/state.db`. A queue for a tool that allows one run at a time is
-machinery without a customer.
+Implemented command:
+
+```bash
+harness-symphony auto --enable
+```
+
+`--enable` is required on every invocation so unattended polling is explicitly
+opt-in. `HarnessDbWorkSource` is the first implemented source. External sources
+such as GitHub Issues, Linear, Jira, and remote Harness are recognized as
+adapter boundaries for future integrations and do not change the run contract,
+result files, changesets, or sync semantics.
+
+The existing single active-run lock in `.symphony/state.db` remains the
+concurrency guard for this first automation slice. The queue controls
+unattended eligibility and retry attempts; it does not introduce multiple
+active agents by itself.
 
 ## 8. Architecture Boundaries
 
@@ -705,6 +718,11 @@ changeset:
 runs:
   allow_here_for_tiny: true
   compact_keep_last: 50
+
+auto:
+  source: harness-db
+  poll_interval_seconds: 30
+  max_attempts: 3
 
 cleanup:
   keep_failed_worktrees: true

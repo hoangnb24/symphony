@@ -41,6 +41,9 @@ pub struct ResolvedConfig {
     pub compact_keep_last: u32,
     pub keep_failed_worktrees: bool,
     pub cleanup_after_sync: bool,
+    pub auto_source: String,
+    pub auto_poll_interval_seconds: u64,
+    pub auto_max_attempts: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -61,6 +64,8 @@ pub struct SymphonyConfig {
     pub runs: RunsConfig,
     #[serde(default)]
     pub cleanup: CleanupConfig,
+    #[serde(default)]
+    pub auto: AutoConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -127,6 +132,16 @@ pub struct CleanupConfig {
     pub cleanup_after_sync: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct AutoConfig {
+    #[serde(default = "default_auto_source")]
+    pub source: String,
+    #[serde(default = "default_auto_poll_interval_seconds")]
+    pub poll_interval_seconds: u64,
+    #[serde(default = "default_auto_max_attempts")]
+    pub max_attempts: u32,
+}
+
 impl Default for SymphonyConfig {
     fn default() -> Self {
         Self {
@@ -138,6 +153,7 @@ impl Default for SymphonyConfig {
             changeset: ChangesetConfig::default(),
             runs: RunsConfig::default(),
             cleanup: CleanupConfig::default(),
+            auto: AutoConfig::default(),
         }
     }
 }
@@ -209,6 +225,16 @@ impl Default for CleanupConfig {
     }
 }
 
+impl Default for AutoConfig {
+    fn default() -> Self {
+        Self {
+            source: default_auto_source(),
+            poll_interval_seconds: default_auto_poll_interval_seconds(),
+            max_attempts: default_auto_max_attempts(),
+        }
+    }
+}
+
 impl SymphonyConfig {
     pub fn load(repo_root: &Path) -> Result<Self, ConfigError> {
         let path = repo_root.join(CONFIG_PATH);
@@ -247,6 +273,9 @@ impl SymphonyConfig {
             compact_keep_last: self.runs.compact_keep_last,
             keep_failed_worktrees: self.cleanup.keep_failed_worktrees,
             cleanup_after_sync: self.cleanup.cleanup_after_sync,
+            auto_source: self.auto.source.clone(),
+            auto_poll_interval_seconds: self.auto.poll_interval_seconds,
+            auto_max_attempts: self.auto.max_attempts,
             repo_root,
         }
     }
@@ -335,6 +364,18 @@ fn default_true() -> bool {
     true
 }
 
+fn default_auto_source() -> String {
+    "harness-db".to_owned()
+}
+
+fn default_auto_poll_interval_seconds() -> u64 {
+    30
+}
+
+fn default_auto_max_attempts() -> u32 {
+    3
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,6 +409,9 @@ mod tests {
         assert_eq!(resolved.compact_keep_last, 50);
         assert!(resolved.keep_failed_worktrees);
         assert!(!resolved.cleanup_after_sync);
+        assert_eq!(resolved.auto_source, "harness-db");
+        assert_eq!(resolved.auto_poll_interval_seconds, 30);
+        assert_eq!(resolved.auto_max_attempts, 3);
     }
 
     #[test]
@@ -386,6 +430,9 @@ runs:
   compact_keep_last: 10
 cleanup:
   cleanup_after_sync: true
+auto:
+  poll_interval_seconds: 5
+  max_attempts: 2
 "#,
         )
         .unwrap();
@@ -399,6 +446,9 @@ cleanup:
         assert_eq!(resolved.agent_command, vec!["codex", "app-server"]);
         assert_eq!(resolved.compact_keep_last, 10);
         assert!(resolved.cleanup_after_sync);
+        assert_eq!(resolved.auto_source, "harness-db");
+        assert_eq!(resolved.auto_poll_interval_seconds, 5);
+        assert_eq!(resolved.auto_max_attempts, 2);
         assert_eq!(
             resolved.worktrees_dir,
             PathBuf::from("/repo/workspace/.symphony/worktrees")

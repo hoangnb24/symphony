@@ -33,6 +33,17 @@ pub struct RunRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueRecord {
+    pub story_id: String,
+    pub source: String,
+    pub status: String,
+    pub attempts: u32,
+    pub max_attempts: u32,
+    pub last_run_id: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct NewRunRecord {
     pub run_id: String,
@@ -80,6 +91,17 @@ impl RunStateStore {
                 path TEXT NOT NULL,
                 applied INTEGER NOT NULL,
                 synced_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS auto_queue (
+                story_id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL,
+                last_run_id TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );",
         )?;
         ensure_column(
@@ -237,6 +259,107 @@ impl RunStateStore {
             .map(|value| value.is_some())
             .map_err(StateError::from)
     }
+
+    pub fn enqueue_work(
+        &self,
+        story_id: &str,
+        source: &str,
+        max_attempts: u32,
+    ) -> Result<QueueRecord, StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection.execute(
+            "INSERT INTO auto_queue (story_id, source, status, max_attempts)
+             VALUES (?1, ?2, 'queued', ?3)
+             ON CONFLICT(story_id) DO UPDATE SET
+                source=excluded.source,
+                status=CASE
+                    WHEN auto_queue.status IN ('completed', 'running') THEN auto_queue.status
+                    WHEN auto_queue.attempts >= auto_queue.max_attempts THEN 'failed'
+                    ELSE 'queued'
+                END,
+                max_attempts=excluded.max_attempts,
+                updated_at=datetime('now');",
+            params![story_id, source, i64::from(max_attempts)],
+        )?;
+        self.queue_record(story_id)
+    }
+
+    pub fn next_queued_work(&self) -> Result<Option<QueueRecord>, StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection
+            .query_row(
+                "SELECT story_id, source, status, attempts, max_attempts, last_run_id, last_error
+                 FROM auto_queue
+                 WHERE status='queued' AND attempts < max_attempts
+                 ORDER BY created_at ASC, story_id ASC
+                 LIMIT 1;",
+                [],
+                queue_from_row,
+            )
+            .optional()
+            .map_err(StateError::from)
+    }
+
+    pub fn mark_queue_running(&self, story_id: &str) -> Result<(), StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection.execute(
+            "UPDATE auto_queue
+             SET status='running', attempts=attempts+1, last_error=NULL, updated_at=datetime('now')
+             WHERE story_id=?1;",
+            params![story_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_queue_completed(&self, story_id: &str, run_id: &str) -> Result<(), StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection.execute(
+            "UPDATE auto_queue
+             SET status='completed', last_run_id=?2, last_error=NULL, updated_at=datetime('now')
+             WHERE story_id=?1;",
+            params![story_id, run_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_queue_failed(
+        &self,
+        story_id: &str,
+        run_id: Option<&str>,
+        error: &str,
+    ) -> Result<QueueRecord, StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection.execute(
+            "UPDATE auto_queue
+             SET status=CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
+                 last_run_id=?2,
+                 last_error=?3,
+                 updated_at=datetime('now')
+             WHERE story_id=?1;",
+            params![story_id, run_id, error],
+        )?;
+        self.queue_record(story_id)
+    }
+
+    pub fn queue_record(&self, story_id: &str) -> Result<QueueRecord, StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection
+            .query_row(
+                "SELECT story_id, source, status, attempts, max_attempts, last_run_id, last_error
+                 FROM auto_queue
+                 WHERE story_id=?1;",
+                params![story_id],
+                queue_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| StateError::RunNotFound(story_id.to_owned()))
+    }
 }
 
 fn active_run_id(connection: &Connection) -> Result<Option<String>, StateError> {
@@ -281,6 +404,18 @@ fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
         pr_url: row.get(7)?,
         sync_status: row.get(8)?,
         next_action: row.get(9)?,
+    })
+}
+
+fn queue_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRecord> {
+    Ok(QueueRecord {
+        story_id: row.get(0)?,
+        source: row.get(1)?,
+        status: row.get(2)?,
+        attempts: row.get::<_, i64>(3)? as u32,
+        max_attempts: row.get::<_, i64>(4)? as u32,
+        last_run_id: row.get(5)?,
+        last_error: row.get(6)?,
     })
 }
 
@@ -378,5 +513,32 @@ mod tests {
             .unwrap();
 
         assert!(store.changeset_synced("run_1").unwrap());
+    }
+
+    #[test]
+    fn queue_records_attempts_and_requeues_until_limit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = RunStateStore::new(temp_dir.path().join(".symphony/state.db"));
+
+        let queued = store.enqueue_work("US-AUTO", "harness-db", 2).unwrap();
+        assert_eq!(queued.status, "queued");
+        assert_eq!(queued.attempts, 0);
+
+        let next = store.next_queued_work().unwrap().unwrap();
+        assert_eq!(next.story_id, "US-AUTO");
+        store.mark_queue_running("US-AUTO").unwrap();
+        let failed_once = store
+            .mark_queue_failed("US-AUTO", Some("run_1"), "agent failed")
+            .unwrap();
+        assert_eq!(failed_once.status, "queued");
+        assert_eq!(failed_once.attempts, 1);
+
+        store.mark_queue_running("US-AUTO").unwrap();
+        let failed_twice = store
+            .mark_queue_failed("US-AUTO", Some("run_2"), "agent failed again")
+            .unwrap();
+        assert_eq!(failed_twice.status, "failed");
+        assert_eq!(failed_twice.attempts, 2);
+        assert!(store.next_queued_work().unwrap().is_none());
     }
 }
