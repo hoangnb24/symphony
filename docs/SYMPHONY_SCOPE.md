@@ -318,14 +318,13 @@ Configuration example:
 
 ```yaml
 agent:
-  adapter: custom
-  command:
-    - "codex"
-    - "app-server"
+  adapter: codex
 ```
 
-Codex app-server can be the first tested adapter, but it should not be a domain
-requirement. Harness is meant to support multiple coding agents.
+The Codex adapter speaks the `codex app-server` JSON-RPC protocol. The
+`custom` adapter remains available for one-shot command adapters, but Codex
+should be a named adapter rather than a command-string convention. Harness is
+meant to support multiple coding agents.
 
 #### 4.6 Finish Protocol
 
@@ -697,11 +696,8 @@ symphony:
   single_active_run: true
 
 agent:
-  adapter: custom
-  command:
-    - "codex"
-    - "app-server"
-  timeout_minutes: 120
+  adapter: codex
+  timeout_minutes: 10
 
 pull_request:
   create: ask

@@ -4,6 +4,7 @@ use std::process::Command;
 
 use thiserror::Error;
 
+use crate::agent::{agent_adapter_status, AgentError};
 use crate::config::ResolvedConfig;
 use crate::sync::unapplied_changesets;
 
@@ -335,29 +336,27 @@ fn check_gitignore(config: &ResolvedConfig) -> DoctorCheck {
 }
 
 fn check_agent_adapter(config: &ResolvedConfig) -> DoctorCheck {
-    if config.agent_adapter != "custom" {
-        return DoctorCheck {
+    match agent_adapter_status(config) {
+        Ok(detail) => DoctorCheck {
             name: "agent adapter",
-            status: CheckStatus::Fail,
-            detail: format!("unsupported adapter '{}'", config.agent_adapter),
-            next: Some("Set agent.adapter: custom in .harness/symphony.yml.".to_owned()),
-        };
-    }
-    if config.agent_command.is_empty() {
-        return DoctorCheck {
+            status: CheckStatus::Pass,
+            detail,
+            next: None,
+        },
+        Err(AgentError::MissingCommand) => DoctorCheck {
             name: "agent adapter",
             status: CheckStatus::Warn,
             detail: "custom agent command is not configured".to_owned(),
             next: Some(
                 "Set agent.command in .harness/symphony.yml before launching runs.".to_owned(),
             ),
-        };
-    }
-    DoctorCheck {
-        name: "agent adapter",
-        status: CheckStatus::Pass,
-        detail: format!("custom command: {}", config.agent_command.join(" ")),
-        next: None,
+        },
+        Err(error) => DoctorCheck {
+            name: "agent adapter",
+            status: CheckStatus::Fail,
+            detail: error.to_string(),
+            next: Some("Set agent.adapter to custom or codex in .harness/symphony.yml.".to_owned()),
+        },
     }
 }
 
@@ -470,10 +469,20 @@ mod tests {
     #[test]
     fn unsupported_agent_adapter_fails() {
         let mut config = base_config();
-        config.agent_adapter = "codex".to_owned();
+        config.agent_adapter = "unknown".to_owned();
         let check = check_agent_adapter(&config);
 
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.next.unwrap().contains("agent.adapter"));
+    }
+
+    #[test]
+    fn codex_agent_adapter_passes_without_explicit_command() {
+        let mut config = base_config();
+        config.agent_adapter = "codex".to_owned();
+        let check = check_agent_adapter(&config);
+
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert!(check.detail.contains("codex app-server"));
     }
 }

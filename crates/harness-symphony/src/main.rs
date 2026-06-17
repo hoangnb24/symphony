@@ -1,3 +1,4 @@
+mod agent;
 mod auto;
 mod changeset;
 mod config;

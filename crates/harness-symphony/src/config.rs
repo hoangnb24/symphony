@@ -333,7 +333,7 @@ fn default_agent_adapter() -> String {
 }
 
 fn default_timeout_minutes() -> u32 {
-    120
+    10
 }
 
 fn default_pull_request_create() -> String {
@@ -400,7 +400,7 @@ mod tests {
         );
         assert!(resolved.single_active_run);
         assert_eq!(resolved.agent_adapter, "custom");
-        assert_eq!(resolved.agent_timeout_minutes, 120);
+        assert_eq!(resolved.agent_timeout_minutes, 10);
         assert_eq!(resolved.pull_request_create, "ask");
         assert_eq!(resolved.pull_request_provider, "github");
         assert_eq!(resolved.pull_request_draft_for, default_draft_for());

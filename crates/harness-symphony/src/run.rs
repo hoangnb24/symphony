@@ -7,6 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::agent::{run_agent, AgentError};
 use crate::changeset::{append_rendered_section, ChangesetError};
 use crate::config::ResolvedConfig;
 use crate::state::{NewRunRecord, RunStateStore, StateError};
@@ -25,12 +26,10 @@ pub enum RunError {
     MissingDatabase(String),
     #[error("git worktree failed: {0}")]
     GitWorktree(String),
-    #[error("agent.command is not configured. Set agent.command in .harness/symphony.yml.")]
-    MissingAgentCommand,
-    #[error("agent command failed with status {status}: {stderr}")]
-    AgentCommandFailed { status: String, stderr: String },
     #[error("run result validation failed: {0}")]
     InvalidResult(String),
+    #[error("{0}")]
+    Agent(#[from] AgentError),
     #[error("{0}")]
     State(#[from] StateError),
     #[error("sqlite error: {0}")]
@@ -211,12 +210,10 @@ pub fn prepare_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Prepa
 }
 
 pub fn execute_run(config: &ResolvedConfig, story_id: &str) -> Result<CompletedRun, RunError> {
-    ensure_agent_configured(config)?;
     execute_prepared_run(config, prepare_run(config, story_id)?)
 }
 
 pub fn execute_here_run(config: &ResolvedConfig, story_id: &str) -> Result<CompletedRun, RunError> {
-    ensure_agent_configured(config)?;
     execute_prepared_run(config, prepare_here_run(config, story_id)?)
 }
 
@@ -224,25 +221,13 @@ fn execute_prepared_run(
     config: &ResolvedConfig,
     prepared: PreparedRun,
 ) -> Result<CompletedRun, RunError> {
-    ensure_agent_configured(config)?;
-
-    let output = Command::new(&config.agent_command[0])
-        .args(&config.agent_command[1..])
-        .current_dir(&prepared.worktree)
-        .env("HARNESS_DB_PATH", &prepared.harness_db_path)
-        .env("HARNESS_RUN_ID", &prepared.run_id)
-        .env("HARNESS_RUN_MODE", "execute")
-        .output()?;
-    if !output.status.success() {
+    if let Err(error) = run_agent(config, &prepared) {
         RunStateStore::new(config.state_db.clone()).update_status(
             &prepared.run_id,
             "failed",
             "inspect agent command failure",
         )?;
-        return Err(RunError::AgentCommandFailed {
-            status: output.status.to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        });
+        return Err(error.into());
     }
 
     let run_id = prepared.run_id.clone();
@@ -263,19 +248,6 @@ fn execute_prepared_run(
         "review run result",
     )?;
     Ok(completed)
-}
-
-fn ensure_agent_configured(config: &ResolvedConfig) -> Result<(), RunError> {
-    if config.agent_adapter != "custom" {
-        return Err(RunError::InvalidResult(format!(
-            "unsupported agent adapter '{}'",
-            config.agent_adapter
-        )));
-    }
-    if config.agent_command.is_empty() {
-        return Err(RunError::MissingAgentCommand);
-    }
-    Ok(())
 }
 
 fn load_runnable_story(db_path: &Path, story_id: &str) -> Result<Story, RunError> {
