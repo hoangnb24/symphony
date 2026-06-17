@@ -443,12 +443,57 @@ fn validate_finished_run(
         }
     }
 
+    let (summary_path, result_path) =
+        promote_run_artifacts(config, &prepared, &summary_path, &result_path)?;
+
     Ok(CompletedRun {
         prepared,
         outcome: result.outcome,
         summary_path,
         result_path,
     })
+}
+
+fn promote_run_artifacts(
+    config: &ResolvedConfig,
+    prepared: &PreparedRun,
+    summary_path: &Path,
+    result_path: &Path,
+) -> Result<(PathBuf, PathBuf), RunError> {
+    if prepared.lightweight {
+        return Ok((summary_path.to_path_buf(), result_path.to_path_buf()));
+    }
+
+    let run_dir = config.runs_dir.join(&prepared.run_id);
+    fs::create_dir_all(&run_dir)?;
+    let promoted_summary = run_dir.join("SUMMARY.md");
+    let promoted_result = run_dir.join("RESULT.json");
+    copy_if_different(summary_path, &promoted_summary)?;
+    copy_if_different(result_path, &promoted_result)?;
+
+    let changeset_path = prepared.worktree.join(format!(
+        ".harness/changesets/{}.changeset.jsonl",
+        prepared.run_id
+    ));
+    if changeset_path.exists() {
+        fs::create_dir_all(&config.changeset_directory)?;
+        copy_if_different(
+            &changeset_path,
+            &config
+                .changeset_directory
+                .join(format!("{}.changeset.jsonl", prepared.run_id)),
+        )?;
+    }
+
+    Ok((promoted_summary, promoted_result))
+}
+
+fn copy_if_different(source: &Path, destination: &Path) -> Result<(), RunError> {
+    if source == destination {
+        return Ok(());
+    }
+    fs::copy(source, destination)?;
+    Ok(())
 }
 
 fn append_lightweight_summary_marker(summary_path: &Path) -> Result<(), RunError> {
@@ -847,5 +892,74 @@ mod tests {
         assert_eq!(completed.outcome, "completed");
         let summary = fs::read_to_string(summary_path).unwrap();
         assert!(summary.contains("lightweight: true"));
+    }
+
+    #[test]
+    fn isolated_finished_run_promotes_review_artifacts() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        let worktree = temp_dir.path().join(".symphony/worktrees/run_full");
+        Command::new("git")
+            .arg("init")
+            .current_dir(temp_dir.path())
+            .output()
+            .unwrap();
+        fs::create_dir_all(worktree.join(".harness/runs/run_full")).unwrap();
+        fs::create_dir_all(worktree.join(".harness/changesets")).unwrap();
+        fs::write(
+            worktree.join(".harness/runs/run_full/SUMMARY.md"),
+            "# Summary\n",
+        )
+        .unwrap();
+        fs::write(
+            worktree.join(".harness/runs/run_full/RESULT.json"),
+            r#"{
+                "version": 1,
+                "run_id": "run_full",
+                "story_id": "US-NORMAL",
+                "outcome": "completed",
+                "validation": {
+                    "commands": [
+                        { "command": "cargo test", "result": "pass" }
+                    ]
+                },
+                "summary_path": ".harness/runs/run_full/SUMMARY.md"
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            worktree.join(".harness/changesets/run_full.changeset.jsonl"),
+            r#"{"op":"changeset.header","version":1,"run_id":"run_full"}"#,
+        )
+        .unwrap();
+
+        let prepared = PreparedRun {
+            run_id: "run_full".to_owned(),
+            story_id: "US-NORMAL".to_owned(),
+            branch: Some("symphony/run_full".to_owned()),
+            worktree,
+            contract_path: config.runs_dir.join("run_full/RUN_CONTRACT.json"),
+            harness_db_path: temp_dir
+                .path()
+                .join(".symphony/worktrees/run_full/harness.db"),
+            lightweight: false,
+        };
+
+        let completed = validate_finished_run(&config, prepared).unwrap();
+
+        assert_eq!(
+            completed.summary_path,
+            config.runs_dir.join("run_full/SUMMARY.md")
+        );
+        assert_eq!(
+            completed.result_path,
+            config.runs_dir.join("run_full/RESULT.json")
+        );
+        assert!(completed.summary_path.exists());
+        assert!(completed.result_path.exists());
+        assert!(config
+            .changeset_directory
+            .join("run_full.changeset.jsonl")
+            .exists());
     }
 }
