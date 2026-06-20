@@ -180,6 +180,7 @@ mod tests {
             status: status.to_owned(),
             result_path: Some(PathBuf::from(".harness/runs/run_1/RESULT.json")),
             pr_url: None,
+            pr_status: "missing".to_owned(),
             sync_status: "not_applied".to_owned(),
             next_action: "review".to_owned(),
         }

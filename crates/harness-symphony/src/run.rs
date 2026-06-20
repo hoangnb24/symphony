@@ -217,7 +217,7 @@ pub fn execute_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Compl
     execute_prepared_run(config, prepare_here_run(config, story_id)?)
 }
 
-fn execute_prepared_run(
+pub fn execute_prepared_run(
     config: &ResolvedConfig,
     prepared: PreparedRun,
 ) -> Result<CompletedRun, RunError> {

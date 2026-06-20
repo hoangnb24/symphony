@@ -67,6 +67,9 @@ pub fn sync_changesets(config: &ResolvedConfig) -> Result<SyncResult, SyncError>
         let applied = stdout.contains(" applied ");
         let operations = parse_operations(&stdout);
         store.record_changeset_synced(&id, &path, applied)?;
+        if applied {
+            let _ = store.update_sync_status(&id, "synced", "done");
+        }
         changes.push(SyncChange {
             id,
             path,

@@ -28,6 +28,7 @@ pub struct RunRecord {
     pub status: String,
     pub result_path: Option<PathBuf>,
     pub pr_url: Option<String>,
+    pub pr_status: String,
     pub sync_status: String,
     pub next_action: String,
 }
@@ -81,6 +82,7 @@ impl RunStateStore {
                 status TEXT NOT NULL,
                 result_path TEXT,
                 pr_url TEXT,
+                pr_status TEXT NOT NULL DEFAULT 'missing',
                 sync_status TEXT NOT NULL DEFAULT 'not_applicable',
                 next_action TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -109,6 +111,12 @@ impl RunStateStore {
             "run_state",
             "lightweight",
             "ALTER TABLE run_state ADD COLUMN lightweight INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        ensure_column(
+            &connection,
+            "run_state",
+            "pr_status",
+            "ALTER TABLE run_state ADD COLUMN pr_status TEXT NOT NULL DEFAULT 'missing';",
         )?;
         Ok(())
     }
@@ -168,7 +176,7 @@ impl RunStateStore {
         let connection = Connection::open(&self.path)?;
         let mut statement = connection.prepare(
             "SELECT run_id, story_id, branch, worktree, lightweight, status, result_path,
-                    pr_url, sync_status, next_action
+                    pr_url, pr_status, sync_status, next_action
              FROM run_state
              ORDER BY created_at DESC, run_id DESC;",
         )?;
@@ -183,7 +191,7 @@ impl RunStateStore {
         connection
             .query_row(
                 "SELECT run_id, story_id, branch, worktree, lightweight, status, result_path,
-                        pr_url, sync_status, next_action
+                        pr_url, pr_status, sync_status, next_action
                  FROM run_state
                  WHERE run_id=?1;",
                 params![run_id],
@@ -199,7 +207,7 @@ impl RunStateStore {
         connection
             .query_row(
                 "SELECT run_id, story_id, branch, worktree, lightweight, status, result_path,
-                        pr_url, sync_status, next_action
+                        pr_url, pr_status, sync_status, next_action
                  FROM run_state
                  WHERE status IN ('prepared', 'running')
                  ORDER BY created_at ASC
@@ -216,9 +224,49 @@ impl RunStateStore {
         let connection = Connection::open(&self.path)?;
         connection.execute(
             "UPDATE run_state
-             SET pr_url=?1, next_action='review pull request', updated_at=datetime('now')
+             SET pr_url=?1, pr_status='created', next_action='review pull request', updated_at=datetime('now')
              WHERE run_id=?2;",
             params![pr_url, run_id],
+        )?;
+        if connection.changes() == 0 {
+            return Err(StateError::RunNotFound(run_id.to_owned()));
+        }
+        Ok(())
+    }
+
+    pub fn update_pr_status(&self, run_id: &str, pr_status: &str) -> Result<(), StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        let next_action = if pr_status == "merged" {
+            "approve sync"
+        } else {
+            "review pull request"
+        };
+        connection.execute(
+            "UPDATE run_state
+             SET pr_status=?1, next_action=?2, updated_at=datetime('now')
+             WHERE run_id=?3;",
+            params![pr_status, next_action, run_id],
+        )?;
+        if connection.changes() == 0 {
+            return Err(StateError::RunNotFound(run_id.to_owned()));
+        }
+        Ok(())
+    }
+
+    pub fn update_sync_status(
+        &self,
+        run_id: &str,
+        sync_status: &str,
+        next_action: &str,
+    ) -> Result<(), StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection.execute(
+            "UPDATE run_state
+             SET sync_status=?1, next_action=?2, updated_at=datetime('now')
+             WHERE run_id=?3;",
+            params![sync_status, next_action, run_id],
         )?;
         if connection.changes() == 0 {
             return Err(StateError::RunNotFound(run_id.to_owned()));
@@ -402,8 +450,9 @@ fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
         status: row.get(5)?,
         result_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
         pr_url: row.get(7)?,
-        sync_status: row.get(8)?,
-        next_action: row.get(9)?,
+        pr_status: row.get(8)?,
+        sync_status: row.get(9)?,
+        next_action: row.get(10)?,
     })
 }
 
@@ -513,6 +562,37 @@ mod tests {
             .unwrap();
 
         assert!(store.changeset_synced("run_1").unwrap());
+    }
+
+    #[test]
+    fn updates_run_sync_status() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = RunStateStore::new(temp_dir.path().join(".symphony/state.db"));
+
+        store.add_run(new_record("run_1", "completed")).unwrap();
+        store.update_sync_status("run_1", "synced", "done").unwrap();
+
+        let run = store.show_run("run_1").unwrap();
+        assert_eq!(run.sync_status, "synced");
+        assert_eq!(run.next_action, "done");
+    }
+
+    #[test]
+    fn updates_pr_status() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = RunStateStore::new(temp_dir.path().join(".symphony/state.db"));
+
+        store.add_run(new_record("run_1", "completed")).unwrap();
+        store
+            .update_pr_url("run_1", "https://example.test/pr/1")
+            .unwrap();
+        assert_eq!(store.show_run("run_1").unwrap().pr_status, "created");
+
+        store.update_pr_status("run_1", "merged").unwrap();
+
+        let run = store.show_run("run_1").unwrap();
+        assert_eq!(run.pr_status, "merged");
+        assert_eq!(run.next_action, "approve sync");
     }
 
     #[test]
