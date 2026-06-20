@@ -171,15 +171,13 @@ The frontend should use Vite, React, and shadcn components.
 - Replacing Harness feature intake.
 - Replacing Symphony run isolation.
 
-## Open Implementation Decisions
+## MVP Implementation Decisions
 
-- Exact Harness schema for task dependency edges.
-- Whether task hierarchy is stored as parent-child story fields or derived from
-  story grouping metadata.
-- Whether PR merge status is polled through the existing PR provider or entered
-  manually for the MVP.
-- Exact API shape for streaming `APP_SERVER_EVENTS.jsonl` safely to the Vite
-  frontend.
+- Dependency edges are stored in Harness `story_dependency` records.
+- Task hierarchy is stored in Harness `story_hierarchy` records.
+- PR merge status is entered manually for the MVP through the local Web UI.
+- Codex events are exposed as a polling tail snapshot from
+  `APP_SERVER_EVENTS.jsonl` through the local Web API.
 
 ## Validation Expectations
 
