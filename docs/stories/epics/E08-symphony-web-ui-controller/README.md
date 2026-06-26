@@ -23,6 +23,9 @@ Symphony records.
    logs.
 6. `US-052` - Sync approval flow and Done transition.
 7. `US-053` - Browser E2E validation for the MVP workflow.
+8. `US-056` - Simplified Kanban-first controller reference revamp.
+9. `US-057` - Dependency graph sidebar view.
+10. `US-058` - Scrollable board columns.
 
 ## Exit Criteria
 
@@ -35,4 +38,3 @@ Symphony records.
 - Dependency cycles are detected and shown as task breakdown problems.
 - Browser-level validation proves the board, task detail, event stream, review,
   and sync workflows.
-
