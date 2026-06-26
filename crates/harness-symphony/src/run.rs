@@ -11,6 +11,7 @@ use crate::agent::{run_agent, AgentError};
 use crate::changeset::{append_rendered_section, ChangesetError};
 use crate::config::ResolvedConfig;
 use crate::state::{NewRunRecord, RunStateStore, StateError};
+use crate::sync::{refresh_checkout_from_upstream, SyncError};
 
 #[derive(Debug, Error)]
 pub enum RunError {
@@ -40,6 +41,8 @@ pub enum RunError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Changeset(#[from] ChangesetError),
+    #[error("{0}")]
+    Sync(#[from] SyncError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +109,7 @@ struct ValidationCommand {
 }
 
 pub fn prepare_run(config: &ResolvedConfig, story_id: &str) -> Result<PreparedRun, RunError> {
+    refresh_checkout_from_upstream(config)?;
     let story = load_runnable_story(&config.harness_db, story_id)?;
 
     let run_id = generate_run_id();
@@ -158,6 +162,7 @@ pub fn prepare_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Prepa
     if !config.allow_here_for_tiny {
         return Err(RunError::HereRunDisabled);
     }
+    refresh_checkout_from_upstream(config)?;
     let story = load_runnable_story(&config.harness_db, story_id)?;
     if story.lane != "tiny" {
         return Err(RunError::StoryNotTiny {
