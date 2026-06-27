@@ -156,7 +156,9 @@ fn ensure_clean_checkout(repo_root: &Path) -> Result<(), SyncError> {
 
 fn is_ignorable_checkout_status(line: &str) -> bool {
     let path = porcelain_path(line);
-    path == ".harness/symphony.yml" || path.starts_with(".harness/runs/")
+    path == ".harness/symphony.yml"
+        || path.starts_with(".harness/runs/")
+        || path.ends_with(".tsbuildinfo")
 }
 
 fn porcelain_path(line: &str) -> &str {
@@ -309,6 +311,40 @@ mod tests {
         fs::create_dir_all(local.join(".harness/runs/run_1")).unwrap();
         fs::write(local.join(".harness/runs/run_1/RESULT.json"), "{}\n").unwrap();
         fs::write(local.join(".harness/symphony.yml"), "version: 1\n").unwrap();
+
+        let refreshed = refresh_checkout_from_upstream(&config_for_root(&local)).unwrap();
+
+        assert!(refreshed);
+    }
+
+    #[test]
+    fn refresh_checkout_allows_generated_typescript_build_info() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let remote = temp_dir.path().join("remote.git");
+        run_git(
+            temp_dir.path(),
+            &["init", "--bare", &remote.display().to_string()],
+        );
+        let local = temp_dir.path().join("local");
+        run_git(
+            temp_dir.path(),
+            &[
+                "clone",
+                &remote.display().to_string(),
+                &local.display().to_string(),
+            ],
+        );
+        configure_git(&local);
+        fs::write(local.join("README.md"), "one\n").unwrap();
+        run_git(&local, &["add", "README.md"]);
+        run_git(&local, &["commit", "-m", "one"]);
+        run_git(&local, &["push", "-u", "origin", "HEAD"]);
+        fs::create_dir_all(local.join("crates/harness-symphony/web-ui")).unwrap();
+        fs::write(
+            local.join("crates/harness-symphony/web-ui/tsconfig.tsbuildinfo"),
+            "{}\n",
+        )
+        .unwrap();
 
         let refreshed = refresh_checkout_from_upstream(&config_for_root(&local)).unwrap();
 
