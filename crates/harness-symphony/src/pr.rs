@@ -33,6 +33,8 @@ pub struct PrPlan {
     pub title: String,
     pub body_path: PathBuf,
     pub files: Vec<PathBuf>,
+    pub base_branch: String,
+    pub head_branch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,12 +72,20 @@ pub fn plan_pr(config: &ResolvedConfig, run: &RunRecord) -> Result<PrPlan, PrErr
         return Err(PrError::MissingArtifacts(run.run_id.clone()));
     }
 
+    let base_branch = current_branch(&config.repo_root)?;
+    let head_branch = run
+        .branch
+        .clone()
+        .ok_or_else(|| PrError::GitFailed(format!("run {} has no review branch", run.run_id)))?;
+
     Ok(PrPlan {
         run_id: run.run_id.clone(),
         draft,
         title: format!("{}: {}", run.story_id, run.status),
         body_path: summary.clone(),
         files: vec![summary, result, changeset],
+        base_branch,
+        head_branch,
     })
 }
 
@@ -96,10 +106,12 @@ pub fn create_pr(
             config.pull_request_provider.clone(),
         ));
     }
+    prepare_review_branch(&run, &plan)?;
     let mut command = Command::new("gh");
     command
         .args(["pr", "create", "--title", &plan.title, "--body-file"])
-        .arg(&plan.body_path);
+        .arg(&plan.body_path)
+        .args(["--head", &plan.head_branch, "--base", &plan.base_branch]);
     if plan.draft {
         command.arg("--draft");
     }
@@ -138,10 +150,117 @@ fn ensure_forbidden_files_not_staged(repo_root: &Path) -> Result<(), PrError> {
     Ok(())
 }
 
+fn current_branch(repo_root: &Path) -> Result<String, PrError> {
+    let output = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(repo_root)
+        .output()?;
+    if !output.status.success() {
+        return Err(PrError::GitFailed(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if branch.is_empty() {
+        return Err(PrError::GitFailed(
+            "cannot create PR from detached HEAD".to_owned(),
+        ));
+    }
+    Ok(branch)
+}
+
+fn prepare_review_branch(run: &RunRecord, plan: &PrPlan) -> Result<(), PrError> {
+    if !run.worktree.exists() {
+        return Err(PrError::GitFailed(format!(
+            "run worktree is missing: {}",
+            run.worktree.display()
+        )));
+    }
+    git(&run.worktree, &["add", "-A"])?;
+    unstage_local_run_files(&run.worktree)?;
+    ensure_forbidden_files_not_staged(&run.worktree)?;
+    if has_staged_changes(&run.worktree)? {
+        git(
+            &run.worktree,
+            &["commit", "-m", &format!("{}: {}", plan.run_id, plan.title)],
+        )?;
+    }
+    git(&run.worktree, &["push", "-u", "origin", &plan.head_branch])?;
+    Ok(())
+}
+
+fn unstage_local_run_files(worktree: &Path) -> Result<(), PrError> {
+    git_allow_failure(
+        worktree,
+        &["reset", "--", "AGENTS.md", "harness.db", ".symphony"],
+    )?;
+    Ok(())
+}
+
+fn has_staged_changes(worktree: &Path) -> Result<bool, PrError> {
+    let output = Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(worktree)
+        .output()?;
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(PrError::GitFailed(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        )),
+    }
+}
+
+fn git(worktree: &Path, args: &[&str]) -> Result<(), PrError> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(worktree)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(PrError::GitFailed(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ))
+    }
+}
+
+fn git_allow_failure(worktree: &Path, args: &[&str]) -> Result<(), PrError> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(worktree)
+        .output()?;
+    if output.status.success() || output.status.code() == Some(128) {
+        Ok(())
+    } else {
+        Err(PrError::GitFailed(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    fn init_git_repo(root: &Path) {
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.invalid"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+    }
 
     fn config(root: &Path) -> ResolvedConfig {
         ResolvedConfig {
@@ -189,6 +308,7 @@ mod tests {
     #[test]
     fn completed_runs_get_normal_pr_plan() {
         let temp_dir = tempfile::tempdir().unwrap();
+        init_git_repo(temp_dir.path());
         let config = config(temp_dir.path());
         fs::create_dir_all(temp_dir.path().join(".harness/runs/run_1")).unwrap();
         fs::create_dir_all(&config.changeset_directory).unwrap();
@@ -212,11 +332,14 @@ mod tests {
 
         assert!(!plan.draft);
         assert_eq!(plan.files.len(), 3);
+        assert_eq!(plan.base_branch, "main");
+        assert_eq!(plan.head_branch, "symphony/run_1");
     }
 
     #[test]
     fn configured_blocked_runs_get_draft_plan() {
         let temp_dir = tempfile::tempdir().unwrap();
+        init_git_repo(temp_dir.path());
         let config = config(temp_dir.path());
         fs::create_dir_all(temp_dir.path().join(".harness/runs/run_1")).unwrap();
         fs::create_dir_all(&config.changeset_directory).unwrap();
