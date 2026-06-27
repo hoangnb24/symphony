@@ -136,13 +136,31 @@ fn upstream_branch(repo_root: &Path) -> Result<Option<String>, SyncError> {
 }
 
 fn ensure_clean_checkout(repo_root: &Path) -> Result<(), SyncError> {
-    let output = git_output(repo_root, &["status", "--porcelain"])?;
-    let status = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let output = git_output(
+        repo_root,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )?;
+    let status = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !is_ignorable_checkout_status(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     if status.is_empty() {
         Ok(())
     } else {
         Err(SyncError::DirtyCheckout(status))
     }
+}
+
+fn is_ignorable_checkout_status(line: &str) -> bool {
+    let path = porcelain_path(line);
+    path == ".harness/symphony.yml" || path.starts_with(".harness/runs/")
+}
+
+fn porcelain_path(line: &str) -> &str {
+    line.get(3..).unwrap_or(line).trim()
 }
 
 fn git_command(repo_root: &Path, args: &[&str]) -> Result<(), SyncError> {
@@ -264,6 +282,107 @@ mod tests {
         let error = refresh_checkout_from_upstream(&config_for_root(&local)).unwrap_err();
 
         assert!(matches!(error, SyncError::DirtyCheckout(status) if status.contains("local.txt")));
+    }
+
+    #[test]
+    fn refresh_checkout_allows_only_local_symphony_artifacts() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let remote = temp_dir.path().join("remote.git");
+        run_git(
+            temp_dir.path(),
+            &["init", "--bare", &remote.display().to_string()],
+        );
+        let local = temp_dir.path().join("local");
+        run_git(
+            temp_dir.path(),
+            &[
+                "clone",
+                &remote.display().to_string(),
+                &local.display().to_string(),
+            ],
+        );
+        configure_git(&local);
+        fs::write(local.join("README.md"), "one\n").unwrap();
+        run_git(&local, &["add", "README.md"]);
+        run_git(&local, &["commit", "-m", "one"]);
+        run_git(&local, &["push", "-u", "origin", "HEAD"]);
+        fs::create_dir_all(local.join(".harness/runs/run_1")).unwrap();
+        fs::write(local.join(".harness/runs/run_1/RESULT.json"), "{}\n").unwrap();
+        fs::write(local.join(".harness/symphony.yml"), "version: 1\n").unwrap();
+
+        let refreshed = refresh_checkout_from_upstream(&config_for_root(&local)).unwrap();
+
+        assert!(refreshed);
+    }
+
+    #[test]
+    fn refresh_checkout_still_refuses_code_changes_with_local_symphony_artifacts() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let remote = temp_dir.path().join("remote.git");
+        run_git(
+            temp_dir.path(),
+            &["init", "--bare", &remote.display().to_string()],
+        );
+        let local = temp_dir.path().join("local");
+        run_git(
+            temp_dir.path(),
+            &[
+                "clone",
+                &remote.display().to_string(),
+                &local.display().to_string(),
+            ],
+        );
+        configure_git(&local);
+        fs::write(local.join("README.md"), "one\n").unwrap();
+        run_git(&local, &["add", "README.md"]);
+        run_git(&local, &["commit", "-m", "one"]);
+        run_git(&local, &["push", "-u", "origin", "HEAD"]);
+        fs::create_dir_all(local.join(".harness/runs/run_1")).unwrap();
+        fs::write(local.join(".harness/runs/run_1/RESULT.json"), "{}\n").unwrap();
+        fs::write(local.join(".harness/symphony.yml"), "version: 1\n").unwrap();
+        fs::write(local.join("local.txt"), "dirty\n").unwrap();
+
+        let error = refresh_checkout_from_upstream(&config_for_root(&local)).unwrap_err();
+
+        assert!(
+            matches!(error, SyncError::DirtyCheckout(status) if status.contains("local.txt") && !status.contains(".harness/runs") && !status.contains(".harness/symphony.yml"))
+        );
+    }
+
+    #[test]
+    fn refresh_checkout_refuses_unapplied_harness_changesets() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let remote = temp_dir.path().join("remote.git");
+        run_git(
+            temp_dir.path(),
+            &["init", "--bare", &remote.display().to_string()],
+        );
+        let local = temp_dir.path().join("local");
+        run_git(
+            temp_dir.path(),
+            &[
+                "clone",
+                &remote.display().to_string(),
+                &local.display().to_string(),
+            ],
+        );
+        configure_git(&local);
+        fs::write(local.join("README.md"), "one\n").unwrap();
+        run_git(&local, &["add", "README.md"]);
+        run_git(&local, &["commit", "-m", "one"]);
+        run_git(&local, &["push", "-u", "origin", "HEAD"]);
+        fs::create_dir_all(local.join(".harness/changesets")).unwrap();
+        fs::write(
+            local.join(".harness/changesets/run_1.changeset.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+
+        let error = refresh_checkout_from_upstream(&config_for_root(&local)).unwrap_err();
+
+        assert!(
+            matches!(error, SyncError::DirtyCheckout(status) if status.contains(".harness/changesets"))
+        );
     }
 
     fn configure_git(repo: &Path) {
