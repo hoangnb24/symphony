@@ -554,13 +554,17 @@ function BoardGrid({
   onSelect: (id: string) => void;
 }) {
   return (
-    <div className="min-w-0 overflow-x-auto pb-2">
-      <div className="grid min-h-[calc(100dvh-220px)] min-w-[1120px] grid-cols-[repeat(6,minmax(176px,1fr))] items-stretch gap-3 max-sm:min-w-0 max-sm:grid-cols-1">
+    <div className="min-h-0 min-w-0 overflow-x-auto pb-2">
+      <div className="grid h-[calc(100dvh-220px)] min-h-[390px] min-w-[1120px] grid-cols-[repeat(6,minmax(176px,1fr))] items-stretch gap-3 max-sm:h-auto max-sm:min-h-0 max-sm:min-w-0 max-sm:grid-cols-1">
         {states.map((state) => {
           const stateItems = items.filter((item) => item.board_state === state);
           const Icon = stateIcon[state];
           return (
-            <section key={state} className="flex min-h-[390px] flex-col overflow-hidden rounded-lg border border-border bg-muted/60">
+            <section
+              key={state}
+              aria-label={`${state} column`}
+              className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-muted/60 max-sm:h-[min(520px,calc(100dvh-180px))] max-sm:min-h-[320px]"
+            >
               <div className="flex min-h-12 items-center justify-between gap-2 border-b border-border bg-background px-3">
                 <div className="flex items-center gap-2">
                   <Icon className={cn("size-4 text-muted-foreground", state === "In Progress" && "animate-spin")} />
@@ -568,7 +572,7 @@ function BoardGrid({
                 </div>
                 <Badge tone={stateTone[state]}>{stateItems.length}</Badge>
               </div>
-              <div className="grid flex-1 content-start gap-2 overflow-auto p-2">
+              <div aria-label={`${state} tasks`} className="grid min-h-0 flex-1 content-start gap-2 overflow-y-auto p-2">
                 {stateItems.map((item) => (
                   <TaskCard key={item.id} item={item} selected={item.id === selectedId} onSelect={onSelect} />
                 ))}

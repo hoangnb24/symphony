@@ -2,7 +2,7 @@
 
 ## Status
 
-planned
+implemented
 
 ## Lane
 
@@ -62,4 +62,8 @@ No harness process change expected.
 
 ## Evidence
 
-Add commands, reports, screenshots, or links after validation exists.
+- `npm --prefix crates/harness-symphony/web-ui run build` passed.
+- `npm --prefix crates/harness-symphony/web-ui run e2e` passed with 3
+  Chromium tests, including dense board-column internal scroll coverage for
+  desktop and mobile viewports.
+- `git diff --check` passed.
