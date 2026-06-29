@@ -5,12 +5,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::agent::{run_agent, AgentError};
 use crate::changeset::{append_rendered_section, ChangesetError};
 use crate::config::ResolvedConfig;
 use crate::state::{NewRunRecord, RunStateStore, StateError};
+use crate::sync::{refresh_checkout_from_upstream, SyncError};
 
 #[derive(Debug, Error)]
 pub enum RunError {
@@ -40,6 +42,8 @@ pub enum RunError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Changeset(#[from] ChangesetError),
+    #[error("{0}")]
+    Sync(#[from] SyncError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +76,7 @@ pub struct RunContract {
     pub harness_db_path: String,
     pub env: RunEnvironment,
     pub required_outputs: Vec<String>,
+    pub result_json_schema: Value,
     pub forbidden_paths: Vec<String>,
     pub agent_instructions: Vec<String>,
 }
@@ -106,6 +111,7 @@ struct ValidationCommand {
 }
 
 pub fn prepare_run(config: &ResolvedConfig, story_id: &str) -> Result<PreparedRun, RunError> {
+    refresh_checkout_from_upstream(config)?;
     let story = load_runnable_story(&config.harness_db, story_id)?;
 
     let run_id = generate_run_id();
@@ -158,6 +164,7 @@ pub fn prepare_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Prepa
     if !config.allow_here_for_tiny {
         return Err(RunError::HereRunDisabled);
     }
+    refresh_checkout_from_upstream(config)?;
     let story = load_runnable_story(&config.harness_db, story_id)?;
     if story.lane != "tiny" {
         return Err(RunError::StoryNotTiny {
@@ -217,7 +224,7 @@ pub fn execute_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Compl
     execute_prepared_run(config, prepare_here_run(config, story_id)?)
 }
 
-fn execute_prepared_run(
+pub fn execute_prepared_run(
     config: &ResolvedConfig,
     prepared: PreparedRun,
 ) -> Result<CompletedRun, RunError> {
@@ -316,6 +323,22 @@ fn build_contract(
         ".symphony/runs/**".to_owned(),
         ".symphony/worktrees/**".to_owned(),
     ];
+    let result_json_schema = json!({
+        "version": 1,
+        "run_id": run_id,
+        "story_id": story_id,
+        "outcome": "completed | blocked | needs_intake | partial | failed | cancelled",
+        "summary_path": format!(".harness/runs/{run_id}/SUMMARY.md"),
+        "validation": {
+            "commands": [
+                {
+                    "command": "exact validation command",
+                    "result": "pass | fail | unavailable"
+                }
+            ],
+            "unavailable": "optional non-empty reason when commands cannot be run"
+        }
+    });
     RunContract {
         version: 1,
         run_id: run_id.to_owned(),
@@ -330,12 +353,14 @@ fn build_contract(
             harness_run_mode: "execute".to_owned(),
         },
         required_outputs,
+        result_json_schema,
         forbidden_paths,
         agent_instructions: vec![
             "Follow AGENTS.md and Harness docs.".to_owned(),
             "Implement only the assigned story scope.".to_owned(),
             "Use the copied harness.db.".to_owned(),
             "Run the configured verification command when available.".to_owned(),
+            "Write RESULT.json with a top-level validation object, not validation_evidence. Use validation.commands[].result values pass, fail, or unavailable.".to_owned(),
         ],
     }
 }
@@ -579,6 +604,7 @@ fn render_agents_shim(contract_path: &Path, contract: &RunContract) -> String {
 - Contract: `{}`\n\
 - Harness DB: `{}`\n\
 - Required outputs: `{}` and `{}`\n\
+- RESULT.json schema: `{}`\n\
 - Forbidden paths: `{}`\n\
 \n\
 Use `HARNESS_DB_PATH={}`, `HARNESS_RUN_ID={}`, and `HARNESS_RUN_MODE=execute` for Harness CLI writes.\n\
@@ -588,6 +614,7 @@ Use `HARNESS_DB_PATH={}`, `HARNESS_RUN_ID={}`, and `HARNESS_RUN_MODE=execute` fo
         contract.harness_db_path,
         contract.required_outputs[0],
         contract.required_outputs[1],
+        contract.result_json_schema,
         contract.forbidden_paths.join("`, `"),
         contract.env.harness_db_path,
         contract.env.harness_run_id,
@@ -711,7 +738,15 @@ mod tests {
         assert!(contract
             .required_outputs
             .contains(&".harness/runs/run_1/RESULT.json".to_owned()));
+        assert_eq!(
+            contract.result_json_schema["validation"]["commands"][0]["result"],
+            "pass | fail | unavailable"
+        );
         assert!(contract.forbidden_paths.contains(&"harness.db".to_owned()));
+        assert!(contract.agent_instructions.iter().any(|instruction| {
+            instruction.contains("top-level validation object")
+                && instruction.contains("not validation_evidence")
+        }));
         assert!(!contract.lightweight);
     }
 

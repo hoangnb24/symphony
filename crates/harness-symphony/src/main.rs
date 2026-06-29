@@ -9,6 +9,7 @@ mod retention;
 mod run;
 mod state;
 mod sync;
+mod web;
 mod work;
 
 use clap::Parser;

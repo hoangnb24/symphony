@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 40 3% 4%;
+  --card: 0 0% 100%;
+  --card-foreground: 40 3% 4%;
+  --primary: 208 100% 44%;
+  --primary-foreground: 0 0% 100%;
+  --muted: 30 10% 96%;
+  --muted-foreground: 30 4% 36%;
+  --accent: 208 100% 94%;
+  --accent-foreground: 40 3% 4%;
+  --destructive: 0 70% 42%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 30 5% 90%;
+  --input: 30 5% 88%;
+  --ring: 208 92% 47%;
+  --warning: 25 100% 43%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: hsl(var(--background));
+}
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.task-close-confetti-host {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.task-close-confetti-burst {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+}
+
+.task-close-confetti-piece {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 6px;
+  height: 10px;
+  border-radius: 2px;
+  opacity: 0;
+  transform: translate(-50%, -50%) rotate(var(--confetti-r));
+  animation: task-close-confetti 720ms cubic-bezier(0.18, 0.8, 0.28, 1) forwards;
+}
+
+@keyframes task-close-confetti {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.6) rotate(var(--confetti-r));
+  }
+
+  18% {
+    opacity: 0.96;
+  }
+
+  72% {
+    opacity: 0.92;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--confetti-x)), calc(-50% + var(--confetti-y))) scale(1)
+      rotate(calc(var(--confetti-r) + 190deg));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-close-confetti-host {
+    display: none;
+  }
+}

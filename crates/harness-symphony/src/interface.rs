@@ -15,7 +15,8 @@ use crate::run::{
 };
 use crate::state::{RunRecord, RunStateStore, StateError};
 use crate::sync::{sync_changesets, unapplied_changesets, SyncError, SyncResult};
-use crate::work::{list_work, WorkError, WorkItem};
+use crate::web::{run_web_server, WebError, WebServerOptions};
+use crate::work::{list_board, list_work, BoardItem, WorkError, WorkItem};
 
 #[derive(Parser, Debug)]
 #[command(name = "harness-symphony")]
@@ -44,6 +45,8 @@ enum Command {
     Auto(AutoArgs),
     /// Apply committed Harness changesets to local harness.db.
     Sync,
+    /// Serve the local Symphony Web UI controller backend.
+    Web(WebArgs),
     /// Create or inspect pull requests for run artifacts.
     Pr(PrArgs),
     /// Inspect resolved Symphony configuration.
@@ -60,6 +63,8 @@ struct WorkArgs {
 enum WorkAction {
     /// List runnable Harness stories.
     List,
+    /// Show dependency-aware Web UI board state.
+    Board,
 }
 
 #[derive(Args, Debug)]
@@ -97,6 +102,16 @@ struct AutoArgs {
     /// Exit after this many idle polls. Omit for long-running mode.
     #[arg(long)]
     max_idle_cycles: Option<u32>,
+}
+
+#[derive(Args, Debug)]
+struct WebArgs {
+    /// Local interface to bind.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    /// Local port to bind.
+    #[arg(long, default_value_t = 4317)]
+    port: u16,
 }
 
 #[derive(Args, Debug)]
@@ -175,6 +190,8 @@ pub enum InterfaceError {
     Pr(#[from] PrError),
     #[error("{0}")]
     Auto(#[from] AutoError),
+    #[error("{0}")]
+    Web(#[from] WebError),
     #[error("could not determine current directory: {0}")]
     CurrentDir(std::io::Error),
 }
@@ -201,6 +218,9 @@ pub fn run(cli: Cli) -> Result<(), InterfaceError> {
         }
         Command::Work(args) => match args.action {
             WorkAction::List => print_work_items(&list_work(&resolved.harness_db)?),
+            WorkAction::Board => {
+                print_board_items(&list_board(&resolved.harness_db, &resolved.state_db)?)
+            }
         },
         Command::Run(args) => {
             if args.prepare_only {
@@ -234,6 +254,13 @@ pub fn run(cli: Cli) -> Result<(), InterfaceError> {
             }
         },
         Command::Sync => print_sync_result(&sync_changesets(&resolved)?),
+        Command::Web(args) => run_web_server(
+            &resolved,
+            WebServerOptions {
+                host: args.host,
+                port: args.port,
+            },
+        )?,
         Command::Auto(args) => {
             let mut options = options_from_config(&resolved);
             options.enabled = args.enable;
@@ -278,6 +305,33 @@ fn print_work_items(items: &[WorkItem]) {
         .collect::<Vec<_>>();
     print_table(
         &["ID", "Status", "Lane", "Verify", "Runnable", "Reason"],
+        &rows,
+    );
+}
+
+fn print_board_items(items: &[BoardItem]) {
+    let rows = items
+        .iter()
+        .map(|item| {
+            vec![
+                item.id.clone(),
+                item.title.clone(),
+                item.board_state.label().to_owned(),
+                item.story_status.clone(),
+                item.lane.clone(),
+                item.verify.clone(),
+                item.blockers.join(","),
+                item.unblocks.join(","),
+                item.active_run.clone().unwrap_or_default(),
+                item.reason.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    print_table(
+        &[
+            "ID", "Title", "Board", "Story", "Lane", "Verify", "Blockers", "Unblocks", "Run",
+            "Reason",
+        ],
         &rows,
     );
 }
@@ -376,6 +430,7 @@ fn print_runs(runs: &[RunRecord]) {
                     .map(|path| path.display().to_string())
                     .unwrap_or_default(),
                 run.pr_url.clone().unwrap_or_default(),
+                run.pr_status.clone(),
                 run.sync_status.clone(),
                 run.next_action.clone(),
             ]
@@ -383,7 +438,17 @@ fn print_runs(runs: &[RunRecord]) {
         .collect::<Vec<_>>();
     print_table(
         &[
-            "Run", "Story", "Branch", "Worktree", "Light", "Status", "Result", "PR", "Sync", "Next",
+            "Run",
+            "Story",
+            "Branch",
+            "Worktree",
+            "Light",
+            "Status",
+            "Result",
+            "PR",
+            "PR Status",
+            "Sync",
+            "Next",
         ],
         &rows,
     );
@@ -404,6 +469,7 @@ fn print_run_detail(run: &RunRecord) {
             .unwrap_or_default()
     );
     println!("pr_url: {}", run.pr_url.clone().unwrap_or_default());
+    println!("pr_status: {}", run.pr_status);
     println!("sync_status: {}", run.sync_status);
     println!("next_action: {}", run.next_action);
 }
@@ -534,7 +600,18 @@ mod tests {
         assert!(help.contains("status"));
         assert!(help.contains("auto"));
         assert!(help.contains("sync"));
+        assert!(help.contains("web"));
         assert!(help.contains("pr"));
         assert!(help.contains("config"));
+        assert!(Cli::try_parse_from(["harness-symphony", "work", "board"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "harness-symphony",
+            "web",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+        ])
+        .is_ok());
     }
 }
