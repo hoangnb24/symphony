@@ -47,7 +47,7 @@ enum Command {
     Sync,
     /// Serve the local Symphony Web UI controller backend.
     Web(WebArgs),
-    /// Create or inspect pull requests for run artifacts.
+    /// Create or inspect pull requests for run changesets.
     Pr(PrArgs),
     /// Inspect resolved Symphony configuration.
     Config(ConfigArgs),
@@ -126,7 +126,7 @@ enum RunsAction {
     List,
     /// Show one local Symphony run.
     Show { run_id: String },
-    /// Compact old committed run artifacts.
+    /// Compact old local run artifacts.
     Compact {
         /// Number of newest run artifact directories to keep.
         #[arg(long)]

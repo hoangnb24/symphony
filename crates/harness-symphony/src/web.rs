@@ -12,7 +12,7 @@ use crate::config::ResolvedConfig;
 use crate::pr::{create_pr, PrError};
 use crate::run::{execute_prepared_run, prepare_run, PreparedRun, RunError};
 use crate::state::{RunStateStore, StateError};
-use crate::sync::{sync_changesets, SyncChange, SyncError};
+use crate::sync::{sync_changeset, SyncChange, SyncError};
 use crate::work::{list_board, BoardItem, WorkError};
 
 const WEB_DIST_DIR_ENV: &str = "HARNESS_SYMPHONY_WEB_DIST_DIR";
@@ -244,7 +244,7 @@ fn sync_run_response(config: &ResolvedConfig, run_id: &str) -> Result<String, We
             },
         );
     }
-    let result = sync_changesets(config)?;
+    let result = sync_changeset(config, run_id)?;
     let changes = result
         .changes
         .into_iter()
@@ -787,6 +787,17 @@ mod tests {
         assert!(commit.status.success());
     }
 
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &std::path::Path) {}
+
     #[test]
     fn health_request_returns_ok_json() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1009,6 +1020,64 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 409 Conflict"));
         assert!(response.contains("pull request must be marked merged"));
+    }
+
+    #[test]
+    fn sync_request_applies_only_requested_run_changeset() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        fs::create_dir_all(&config.changeset_directory).unwrap();
+        fs::create_dir_all(temp_dir.path().join("scripts/bin")).unwrap();
+        fs::write(
+            config.changeset_directory.join("run_sync.changeset.jsonl"),
+            r#"{"op":"changeset.header","version":1,"run_id":"run_sync"}
+{"op":"story.update","version":1,"id":"US-SYNC","payload":{"status":"implemented"}}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            config.changeset_directory.join("run_other.changeset.jsonl"),
+            r#"{"op":"changeset.header","version":1,"run_id":"run_other"}
+{"op":"story.update","version":1,"id":"US-OTHER","payload":{"status":"implemented"}}
+"#,
+        )
+        .unwrap();
+        let cli_path = temp_dir.path().join("scripts/bin/harness-cli");
+        fs::write(
+            &cli_path,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> sync-args.log\necho 'Changeset run_sync applied (2 operation(s)).'\n",
+        )
+        .unwrap();
+        make_executable(&cli_path);
+
+        let store = RunStateStore::new(config.state_db.clone());
+        store
+            .add_run(crate::state::NewRunRecord {
+                run_id: "run_sync".to_owned(),
+                story_id: "US-SYNC".to_owned(),
+                branch: Some("symphony/run_sync".to_owned()),
+                worktree: temp_dir.path().join("worktree"),
+                lightweight: false,
+                status: "completed".to_owned(),
+                result_path: Some(PathBuf::from(".harness/runs/run_sync/RESULT.json")),
+                sync_status: "not_applied".to_owned(),
+                next_action: "review pull request".to_owned(),
+            })
+            .unwrap();
+        store
+            .update_pr_url("run_sync", "https://example.test/pr/1")
+            .unwrap();
+        store.update_pr_status("run_sync", "merged").unwrap();
+
+        let response =
+            handle_request(&config, "POST /api/runs/run_sync/sync HTTP/1.1\r\n\r\n").unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains(r#""id":"run_sync""#));
+        assert!(!response.contains("run_other"));
+        let args = fs::read_to_string(temp_dir.path().join("sync-args.log")).unwrap();
+        assert!(args.contains(".harness/changesets/run_sync.changeset.jsonl"));
+        assert!(!args.contains("run_other.changeset.jsonl"));
     }
 
     #[test]

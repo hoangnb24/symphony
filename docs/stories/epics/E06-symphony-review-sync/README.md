@@ -2,13 +2,14 @@
 
 ## Goal
 
-Turn local runs into reviewable committed artifacts and make merged changesets
+Turn local runs into reviewable PR evidence and make merged changesets
 safe to apply on any clone.
 
 ## Product Contract
 
-Run artifacts and changesets are committed review surfaces. Root `harness.db`
-is updated after merge by idempotent sync or rebuild, never by committing the DB.
+Run summaries and results are local review evidence. Semantic changesets are the
+committed durable sync surface. Root `harness.db` is updated after merge by
+idempotent sync or rebuild, never by committing the DB.
 
 ## Stories
 
@@ -19,9 +20,8 @@ is updated after merge by idempotent sync or rebuild, never by committing the DB
 
 ## Exit Criteria
 
-- PRs include `SUMMARY.md`, `RESULT.json`, and semantic changesets.
+- PRs use `SUMMARY.md` as the body and include semantic changesets.
 - Reviewers see a human-readable Harness changes table.
 - `sync` applies committed-but-unapplied changesets safely and is a no-op when
   repeated.
 - `.harness/changesets/` is permanent; `.harness/runs/` can be compacted.
-

@@ -46,43 +46,22 @@ pub fn sync_changesets(config: &ResolvedConfig) -> Result<SyncResult, SyncError>
     let paths = changeset_files(&config.changeset_directory)?;
     let mut changes = Vec::new();
     for path in paths {
-        let id = changeset_id(&path)?;
-        if harness_db_has_changeset(&config.harness_db, &id)? && store.changeset_synced(&id)? {
-            changes.push(SyncChange {
-                id,
-                path,
-                applied: false,
-                operations: 0,
-            });
-            continue;
-        }
-        let output = Command::new(config.repo_root.join("scripts/bin/harness-cli"))
-            .args(["db", "changeset", "apply"])
-            .arg(&path)
-            .env("HARNESS_DB_PATH", &config.harness_db)
-            .current_dir(&config.repo_root)
-            .output()?;
-        if !output.status.success() {
-            return Err(SyncError::ApplyFailed {
-                path: path.display().to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let applied = stdout.contains(" applied ");
-        let operations = parse_operations(&stdout);
-        store.record_changeset_synced(&id, &path, applied)?;
-        if applied {
-            let _ = store.update_sync_status(&id, "synced", "done");
-        }
-        changes.push(SyncChange {
-            id,
-            path,
-            applied,
-            operations,
-        });
+        changes.push(apply_changeset_path(config, &store, path)?);
     }
     Ok(SyncResult { changes })
+}
+
+pub fn sync_changeset(config: &ResolvedConfig, run_id: &str) -> Result<SyncResult, SyncError> {
+    refresh_checkout_from_upstream(config)?;
+    let store = RunStateStore::new(config.state_db.clone());
+    store.init()?;
+    let path = config
+        .changeset_directory
+        .join(format!("{run_id}.changeset.jsonl"));
+    let change = apply_changeset_path(config, &store, path)?;
+    Ok(SyncResult {
+        changes: vec![change],
+    })
 }
 
 pub fn refresh_checkout_from_upstream(config: &ResolvedConfig) -> Result<bool, SyncError> {
@@ -121,6 +100,47 @@ fn harness_db_has_changeset(db_path: &Path, id: &str) -> Result<bool, SyncError>
         .optional()
         .map(|value| value.is_some())
         .map_err(SyncError::from)
+}
+
+fn apply_changeset_path(
+    config: &ResolvedConfig,
+    store: &RunStateStore,
+    path: PathBuf,
+) -> Result<SyncChange, SyncError> {
+    let id = changeset_id(&path)?;
+    if harness_db_has_changeset(&config.harness_db, &id)? && store.changeset_synced(&id)? {
+        return Ok(SyncChange {
+            id,
+            path,
+            applied: false,
+            operations: 0,
+        });
+    }
+    let output = Command::new(config.repo_root.join("scripts/bin/harness-cli"))
+        .args(["db", "changeset", "apply"])
+        .arg(&path)
+        .env("HARNESS_DB_PATH", &config.harness_db)
+        .current_dir(&config.repo_root)
+        .output()?;
+    if !output.status.success() {
+        return Err(SyncError::ApplyFailed {
+            path: path.display().to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let applied = stdout.contains(" applied ");
+    let operations = parse_operations(&stdout);
+    store.record_changeset_synced(&id, &path, applied)?;
+    if applied {
+        let _ = store.update_sync_status(&id, "synced", "done");
+    }
+    Ok(SyncChange {
+        id,
+        path,
+        applied,
+        operations,
+    })
 }
 
 fn upstream_branch(repo_root: &Path) -> Result<Option<String>, SyncError> {
@@ -210,6 +230,44 @@ mod tests {
             parse_operations("Changeset run_1 already applied; skipped."),
             0
         );
+    }
+
+    #[test]
+    fn sync_changeset_applies_only_requested_run() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        fs::create_dir_all(&config.changeset_directory).unwrap();
+        fs::create_dir_all(temp_dir.path().join("scripts/bin")).unwrap();
+        fs::write(
+            config.changeset_directory.join("run_one.changeset.jsonl"),
+            r#"{"op":"changeset.header","version":1,"run_id":"run_one"}
+{"op":"story.update","version":1,"id":"US-ONE","payload":{"status":"implemented"}}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            config.changeset_directory.join("run_two.changeset.jsonl"),
+            r#"{"op":"changeset.header","version":1,"run_id":"run_two"}
+{"op":"story.update","version":1,"id":"US-TWO","payload":{"status":"implemented"}}
+"#,
+        )
+        .unwrap();
+        let cli_path = temp_dir.path().join("scripts/bin/harness-cli");
+        fs::write(
+            &cli_path,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> sync-args.log\necho 'Changeset run_one applied (2 operation(s)).'\n",
+        )
+        .unwrap();
+        make_executable(&cli_path);
+
+        let result = sync_changeset(&config, "run_one").unwrap();
+
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].id, "run_one");
+        assert!(result.changes[0].applied);
+        let args = fs::read_to_string(temp_dir.path().join("sync-args.log")).unwrap();
+        assert!(args.contains(".harness/changesets/run_one.changeset.jsonl"));
+        assert!(!args.contains("run_two.changeset.jsonl"));
     }
 
     #[test]
@@ -439,6 +497,17 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
 
     fn config_for_root(root: &Path) -> ResolvedConfig {
         ResolvedConfig {

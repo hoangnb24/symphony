@@ -83,7 +83,7 @@ pub fn plan_pr(config: &ResolvedConfig, run: &RunRecord) -> Result<PrPlan, PrErr
         draft,
         title: format!("{}: {}", run.story_id, run.status),
         body_path: summary.clone(),
-        files: vec![summary, result, changeset],
+        files: vec![changeset],
         base_branch,
         head_branch,
     })
@@ -331,7 +331,14 @@ mod tests {
         let plan = plan_pr(&config, &run("completed", temp_dir.path())).unwrap();
 
         assert!(!plan.draft);
-        assert_eq!(plan.files.len(), 3);
+        assert_eq!(
+            plan.body_path,
+            temp_dir.path().join(".harness/runs/run_1/SUMMARY.md")
+        );
+        assert_eq!(
+            plan.files,
+            vec![config.changeset_directory.join("run_1.changeset.jsonl")]
+        );
         assert_eq!(plan.base_branch, "main");
         assert_eq!(plan.head_branch, "symphony/run_1");
     }

@@ -11,7 +11,7 @@ normal
 ## Product Contract
 
 Symphony must keep permanent changeset history while giving users a safe way to
-compact old run summaries and results.
+compact old local run summaries and results.
 
 ## Relevant Product Docs
 
@@ -20,7 +20,7 @@ compact old run summaries and results.
 ## Acceptance Criteria
 
 - `.harness/changesets/` is never pruned by compaction.
-- `.harness/runs/<run_id>/SUMMARY.md` and `RESULT.json` are kept by default.
+- Local `.harness/runs/<run_id>/SUMMARY.md` and `RESULT.json` are kept by default.
 - `harness-symphony runs compact --keep-last <n>` compacts or deletes old run
   artifacts according to documented policy.
 - Compaction refuses unsafe values and reports exactly what it changed.
@@ -55,7 +55,7 @@ Controls repository growth without weakening changeset source-of-truth history.
 - Compaction refuses `--keep-last 0`, removes old run artifact directories,
   and never touches `.harness/changesets/`.
 - Updated default `symphony.runs_dir` to `.harness/runs` so review artifacts
-  are committed surfaces by default.
+  have a stable local surface by default.
 - Smoke: compacted a temporary `.harness/runs` tree while preserving
   `.harness/changesets/run_1.changeset.jsonl`.
 - Validation: retention unit tests; `cargo test --workspace`;

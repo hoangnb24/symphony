@@ -19,7 +19,7 @@ Revision 2 changes:
 - Run ceremony is lane-aware; tiny-lane work gets a lightweight path.
 - The standalone queue milestone is removed; a single active-run lock is
   enough until real concurrency arrives.
-- Committed run artifacts get an explicit retention policy.
+- Local run artifacts get an explicit retention policy.
 
 ## 1. Product Thesis
 
@@ -133,13 +133,14 @@ This removes the riskiest parts of the previous scope: base-checksum
 validation, per-PR reconcile bookkeeping, and `reconciliation_failed` repair
 flows that depended on diffing database states.
 
-### 3.4 Committed Artifacts Are The Team Surface
+### 3.4 Review Artifacts And Committed State
 
-The reviewable collaboration surface is committed artifacts:
+The reviewable collaboration surface is split by durability:
 
-- run summaries (with a human-readable changeset rendering)
-- run results
-- semantic Harness changesets
+- run summaries (with a human-readable changeset rendering) stay local and feed
+  the PR body
+- run results stay local for Web UI review and debugging
+- semantic Harness changesets are committed durable state
 - docs, stories, decisions, tests, and product changes
 
 `harness.db` itself is never committed and never reviewed.
@@ -262,7 +263,8 @@ HARNESS_RUN_MODE=execute
 
 With the operation log in place, no base database snapshot is required. The
 changeset accumulates inside the worktree as the agent works and is committed
-with the rest of the run artifacts.
+with product/docs/test changes. Run summaries and results remain local runtime
+artifacts.
 
 #### 4.4 Run Contract
 
@@ -418,11 +420,10 @@ Recommended v1 policy:
 - blocked/needs-intake: open draft PR only if useful artifacts exist
 - failed/cancelled: no PR by default
 
-If a PR is created, it must include:
+If a PR is created, it must use the summary as the PR body and commit the
+semantic changeset:
 
 ```text
-.harness/runs/<run_id>/SUMMARY.md
-.harness/runs/<run_id>/RESULT.json
 .harness/changesets/<run_id>.changeset.jsonl
 ```
 
@@ -523,13 +524,12 @@ stories.
 
 #### 4.12 Artifact Retention
 
-Committed run artifacts grow with every run. v1 must define retention up
-front:
+Local run artifacts grow with every run. v1 must define retention up front:
 
 - `.harness/changesets/` is permanent history. It is the source of truth and
   is never pruned.
-- `.harness/runs/<run_id>/` (summary, result) is kept by default, with a
-  compaction command:
+- `.harness/runs/<run_id>/` (summary, result) is local runtime evidence, kept by
+  default, with a compaction command:
 
   ```bash
   harness-symphony runs compact --keep-last <n>
@@ -786,7 +786,7 @@ Given an agent run finishes, Symphony accepts the run only if:
 
 Given PR creation is enabled, Symphony:
 
-1. includes summary, result, and changeset artifacts
+1. uses the summary as the PR body and commits the changeset artifact
 2. renders the changeset as a markdown table in the summary and PR body
 3. does not include `harness.db`
 4. does not include `.symphony/` files
@@ -867,12 +867,12 @@ Mitigation:
 
 ### 12.5 Artifact Growth
 
-Risk: committed run artifacts bloat the repository over time.
+Risk: local run artifacts bloat the checkout over time.
 
 Mitigation:
 
 - retention policy and `runs compact` from v1 (4.12)
-- changesets stay permanent but are small, append-only JSONL
+- only changesets stay permanent in git; they are small, append-only JSONL
 
 ## 13. Recommended Implementation Order
 

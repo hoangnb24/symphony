@@ -249,7 +249,7 @@ Inspect one run:
 target/debug/harness-symphony runs show <run_id>
 ```
 
-Review these files before opening or merging a PR:
+Review these local files before opening a PR:
 
 ```text
 .harness/runs/<run_id>/SUMMARY.md
@@ -258,7 +258,8 @@ Review these files before opening or merging a PR:
 ```
 
 `SUMMARY.md` is the human review surface. It should include a readable Harness
-changes table so reviewers do not have to inspect raw JSONL first.
+changes table so reviewers do not have to inspect raw JSONL first. PR creation
+uses the summary as the PR body and commits only the durable changeset artifact.
 
 ## Optional PR Flow
 

@@ -10,8 +10,9 @@ normal
 
 ## Product Contract
 
-Symphony may create pull requests for run artifacts and code changes, but PR
-creation must be configurable and outcome-aware.
+Symphony may create pull requests for code changes and durable Harness
+changesets, using local run artifacts as PR evidence. PR creation must be
+configurable and outcome-aware.
 
 ## Relevant Product Docs
 
@@ -24,7 +25,7 @@ creation must be configurable and outcome-aware.
 - Blocked, `needs_intake`, and partial runs open draft PRs only when useful
   artifacts exist and policy allows it.
 - Failed and cancelled runs do not open PRs by default.
-- PRs include summary, result, and changeset artifacts.
+- PRs use the summary as the body and commit the changeset artifact.
 - PRs never include `harness.db` or `.symphony/` files.
 
 ## Design Notes
@@ -56,7 +57,7 @@ Connects local Symphony output to team review while keeping PR creation optional
   `--dry-run` support.
 - PR planning respects disabled policy, completed normal PRs, configured draft
   outcomes, and failed/cancelled default refusal.
-- PR artifacts include `SUMMARY.md`, `RESULT.json`, and the semantic changeset;
+- PRs use `SUMMARY.md` as the body and commit the semantic changeset;
   forbidden staged `harness.db` and `.symphony/` paths are rejected.
 - Validation: PR policy unit tests; `cargo test --workspace`;
   `cargo fmt --check`; `cargo clippy --workspace -- -D warnings`.
