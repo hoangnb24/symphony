@@ -407,9 +407,15 @@ fn review_response(config: &ResolvedConfig, run_id: &str) -> Result<String, WebE
     let run_dir = config.runs_dir.join(run_id);
     let summary_path = run_dir.join("SUMMARY.md");
     let result_path = run_dir.join("RESULT.json");
-    let changeset_path = config
+    let review_changeset_path = run_dir.join("changeset.jsonl");
+    let committed_changeset_path = config
         .changeset_directory
         .join(format!("{run_id}.changeset.jsonl"));
+    let changeset_path = if review_changeset_path.exists() {
+        review_changeset_path
+    } else {
+        committed_changeset_path
+    };
     let event_path = run_dir.join("APP_SERVER_EVENTS.jsonl");
 
     let summary = read_optional_text(&summary_path)?;
@@ -438,7 +444,7 @@ fn review_response(config: &ResolvedConfig, run_id: &str) -> Result<String, WebE
         let rendered = render_changeset(&changeset_path)?;
         Some(render_markdown(
             &rendered,
-            &format!(".harness/changesets/{run_id}.changeset.jsonl"),
+            &changeset_display_path(&config.repo_root, &changeset_path),
         ))
     } else {
         None
@@ -470,6 +476,13 @@ fn review_response(config: &ResolvedConfig, run_id: &str) -> Result<String, WebE
             suggested_next_action,
         },
     )
+}
+
+fn changeset_display_path(repo_root: &Path, path: &Path) -> String {
+    path.strip_prefix(repo_root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 fn read_optional_text(path: &Path) -> Result<Option<String>, WebError> {
@@ -887,7 +900,6 @@ mod tests {
             .unwrap();
         let run_dir = config.runs_dir.join("run_review");
         fs::create_dir_all(&run_dir).unwrap();
-        fs::create_dir_all(&config.changeset_directory).unwrap();
         fs::write(run_dir.join("SUMMARY.md"), "# Summary\n\nDone.\n").unwrap();
         fs::write(
             run_dir.join("RESULT.json"),
@@ -895,9 +907,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            config
-                .changeset_directory
-                .join("run_review.changeset.jsonl"),
+            run_dir.join("changeset.jsonl"),
             r#"{"op":"changeset.header","version":1,"run_id":"run_review"}
 {"op":"story.update","version":1,"id":"US-REVIEW","payload":{"status":"implemented"}}"#,
         )

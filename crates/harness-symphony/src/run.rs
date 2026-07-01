@@ -501,13 +501,7 @@ fn promote_run_artifacts(
         prepared.run_id
     ));
     if changeset_path.exists() {
-        fs::create_dir_all(&config.changeset_directory)?;
-        copy_if_different(
-            &changeset_path,
-            &config
-                .changeset_directory
-                .join(format!("{}.changeset.jsonl", prepared.run_id)),
-        )?;
+        copy_if_different(&changeset_path, &run_dir.join("changeset.jsonl"))?;
     }
 
     Ok((promoted_summary, promoted_result))
@@ -992,7 +986,8 @@ mod tests {
         );
         assert!(completed.summary_path.exists());
         assert!(completed.result_path.exists());
-        assert!(config
+        assert!(config.runs_dir.join("run_full/changeset.jsonl").exists());
+        assert!(!config
             .changeset_directory
             .join("run_full.changeset.jsonl")
             .exists());

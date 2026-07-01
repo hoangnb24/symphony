@@ -65,9 +65,10 @@ pub fn plan_pr(config: &ResolvedConfig, run: &RunRecord) -> Result<PrPlan, PrErr
     let result = config
         .repo_root
         .join(format!(".harness/runs/{}/RESULT.json", run.run_id));
-    let changeset = config
-        .changeset_directory
-        .join(format!("{}.changeset.jsonl", run.run_id));
+    let changeset = run.worktree.join(format!(
+        ".harness/changesets/{}.changeset.jsonl",
+        run.run_id
+    ));
     if !summary.exists() || !result.exists() || !changeset.exists() {
         return Err(PrError::MissingArtifacts(run.run_id.clone()));
     }
@@ -311,7 +312,12 @@ mod tests {
         init_git_repo(temp_dir.path());
         let config = config(temp_dir.path());
         fs::create_dir_all(temp_dir.path().join(".harness/runs/run_1")).unwrap();
-        fs::create_dir_all(&config.changeset_directory).unwrap();
+        fs::create_dir_all(
+            temp_dir
+                .path()
+                .join(".symphony/worktrees/run_1/.harness/changesets"),
+        )
+        .unwrap();
         fs::write(
             temp_dir.path().join(".harness/runs/run_1/SUMMARY.md"),
             "summary",
@@ -323,7 +329,9 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            config.changeset_directory.join("run_1.changeset.jsonl"),
+            temp_dir
+                .path()
+                .join(".symphony/worktrees/run_1/.harness/changesets/run_1.changeset.jsonl"),
             "{}",
         )
         .unwrap();
@@ -337,7 +345,9 @@ mod tests {
         );
         assert_eq!(
             plan.files,
-            vec![config.changeset_directory.join("run_1.changeset.jsonl")]
+            vec![temp_dir
+                .path()
+                .join(".symphony/worktrees/run_1/.harness/changesets/run_1.changeset.jsonl")]
         );
         assert_eq!(plan.base_branch, "main");
         assert_eq!(plan.head_branch, "symphony/run_1");
@@ -349,7 +359,12 @@ mod tests {
         init_git_repo(temp_dir.path());
         let config = config(temp_dir.path());
         fs::create_dir_all(temp_dir.path().join(".harness/runs/run_1")).unwrap();
-        fs::create_dir_all(&config.changeset_directory).unwrap();
+        fs::create_dir_all(
+            temp_dir
+                .path()
+                .join(".symphony/worktrees/run_1/.harness/changesets"),
+        )
+        .unwrap();
         fs::write(
             temp_dir.path().join(".harness/runs/run_1/SUMMARY.md"),
             "summary",
@@ -361,7 +376,9 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            config.changeset_directory.join("run_1.changeset.jsonl"),
+            temp_dir
+                .path()
+                .join(".symphony/worktrees/run_1/.harness/changesets/run_1.changeset.jsonl"),
             "{}",
         )
         .unwrap();
