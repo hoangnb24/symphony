@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -111,6 +112,7 @@ struct ValidationCommand {
 }
 
 pub fn prepare_run(config: &ResolvedConfig, story_id: &str) -> Result<PreparedRun, RunError> {
+    ensure_no_active_run(config)?;
     refresh_checkout_from_upstream(config)?;
     let story = load_runnable_story(&config.harness_db, story_id)?;
 
@@ -164,6 +166,7 @@ pub fn prepare_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Prepa
     if !config.allow_here_for_tiny {
         return Err(RunError::HereRunDisabled);
     }
+    ensure_no_active_run(config)?;
     refresh_checkout_from_upstream(config)?;
     let story = load_runnable_story(&config.harness_db, story_id)?;
     if story.lane != "tiny" {
@@ -266,6 +269,13 @@ fn load_runnable_story(db_path: &Path, story_id: &str) -> Result<Story, RunError
         });
     }
     Ok(story)
+}
+
+fn ensure_no_active_run(config: &ResolvedConfig) -> Result<(), RunError> {
+    if let Some(active) = RunStateStore::new(config.state_db.clone()).active_run()? {
+        return Err(StateError::ActiveRunExists(active.run_id).into());
+    }
+    Ok(())
 }
 
 fn load_story(db_path: &Path, story_id: &str) -> Result<Story, RunError> {
@@ -629,11 +639,13 @@ fn display_path(config: &ResolvedConfig, path: &Path) -> String {
 }
 
 fn generate_run_id() -> String {
+    static RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
+        .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    format!("run_{}_{}", timestamp, std::process::id())
+    let sequence = RUN_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("run_{}_{}_{}", timestamp, std::process::id(), sequence)
 }
 
 #[derive(Debug)]
@@ -845,6 +857,35 @@ mod tests {
     }
 
     #[test]
+    fn prepare_run_checks_active_lock_before_creating_worktree_artifacts() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        let store = RunStateStore::new(config.state_db.clone());
+        store
+            .add_run(NewRunRecord {
+                run_id: "run_active".to_owned(),
+                story_id: "US-ACTIVE".to_owned(),
+                branch: Some("symphony/run_active".to_owned()),
+                worktree: config.worktrees_dir.join("run_active"),
+                lightweight: false,
+                status: "prepared".to_owned(),
+                result_path: Some(PathBuf::from(".harness/runs/run_active/RESULT.json")),
+                sync_status: "not_applied".to_owned(),
+                next_action: "continue active run".to_owned(),
+            })
+            .unwrap();
+
+        let error = prepare_run(&config, "US-NEXT").unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunError::State(StateError::ActiveRunExists(id)) if id == "run_active"
+        ));
+        assert!(!config.worktrees_dir.exists());
+        assert!(!config.runs_dir.exists());
+    }
+
+    #[test]
     fn prepare_here_run_copies_db_to_run_dir_and_records_lightweight_state() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = config_for_root(temp_dir.path());
@@ -866,6 +907,16 @@ mod tests {
             .unwrap();
         assert!(run.lightweight);
         assert_eq!(run.branch, None);
+    }
+
+    #[test]
+    fn generated_run_ids_are_unique_for_immediate_calls() {
+        let first = generate_run_id();
+        let second = generate_run_id();
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("run_"));
+        assert!(second.starts_with("run_"));
     }
 
     #[test]
