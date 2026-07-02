@@ -45,6 +45,47 @@ pub struct WebServerOptions {
     pub port: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HttpResponse {
+    bytes: Vec<u8>,
+}
+
+impl HttpResponse {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    #[cfg(test)]
+    fn starts_with(&self, value: &str) -> bool {
+        self.bytes.starts_with(value.as_bytes())
+    }
+
+    #[cfg(test)]
+    fn ends_with(&self, value: &str) -> bool {
+        self.bytes.ends_with(value.as_bytes())
+    }
+
+    #[cfg(test)]
+    fn contains(&self, value: &str) -> bool {
+        self.bytes
+            .windows(value.len())
+            .any(|window| window == value.as_bytes())
+    }
+
+    #[cfg(test)]
+    fn body(&self) -> &[u8] {
+        self.bytes
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| &self.bytes[index + 4..])
+            .unwrap_or(&[])
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct BoardResponse {
     items: Vec<BoardItemResponse>,
@@ -137,7 +178,10 @@ pub fn run_web_server(config: &ResolvedConfig, options: WebServerOptions) -> Res
     Ok(())
 }
 
-fn handle_stream(config: &ResolvedConfig, stream: &mut TcpStream) -> Result<String, WebError> {
+fn handle_stream(
+    config: &ResolvedConfig,
+    stream: &mut TcpStream,
+) -> Result<HttpResponse, WebError> {
     let mut buffer = [0_u8; 8192];
     let bytes = stream.read(&mut buffer)?;
     let request = String::from_utf8_lossy(&buffer[..bytes]);
@@ -152,7 +196,7 @@ fn handle_stream(config: &ResolvedConfig, stream: &mut TcpStream) -> Result<Stri
     }
 }
 
-fn handle_request(config: &ResolvedConfig, request: &str) -> Result<String, WebError> {
+fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse, WebError> {
     let (method, path) = parse_request_line(request);
     match (method.as_deref(), path.as_deref()) {
         (Some("GET"), Some("/health")) => json_response(200, &serde_json::json!({"ok": true})),
@@ -215,7 +259,7 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<String, WebE
     }
 }
 
-fn sync_run_response(config: &ResolvedConfig, run_id: &str) -> Result<String, WebError> {
+fn sync_run_response(config: &ResolvedConfig, run_id: &str) -> Result<HttpResponse, WebError> {
     if !safe_identifier(run_id) {
         return json_response(
             400,
@@ -263,7 +307,7 @@ fn sync_run_response(config: &ResolvedConfig, run_id: &str) -> Result<String, We
     )
 }
 
-fn pr_merged_response(config: &ResolvedConfig, run_id: &str) -> Result<String, WebError> {
+fn pr_merged_response(config: &ResolvedConfig, run_id: &str) -> Result<HttpResponse, WebError> {
     if !safe_identifier(run_id) {
         return json_response(
             400,
@@ -300,7 +344,7 @@ fn pr_merged_response(config: &ResolvedConfig, run_id: &str) -> Result<String, W
     }
 }
 
-fn start_run_response(config: &ResolvedConfig, story_id: &str) -> Result<String, WebError> {
+fn start_run_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpResponse, WebError> {
     if let Some(active) = RunStateStore::new(config.state_db.clone()).active_run()? {
         return json_response(
             409,
@@ -361,7 +405,7 @@ fn create_review_pr(config: &ResolvedConfig, run_id: &str) -> Result<(), WebErro
     Ok(())
 }
 
-fn events_response(config: &ResolvedConfig, run_id: &str) -> Result<String, WebError> {
+fn events_response(config: &ResolvedConfig, run_id: &str) -> Result<HttpResponse, WebError> {
     if !safe_identifier(run_id) {
         return json_response(
             400,
@@ -381,7 +425,7 @@ fn events_response(config: &ResolvedConfig, run_id: &str) -> Result<String, WebE
     )
 }
 
-fn review_response(config: &ResolvedConfig, run_id: &str) -> Result<String, WebError> {
+fn review_response(config: &ResolvedConfig, run_id: &str) -> Result<HttpResponse, WebError> {
     if !safe_identifier(run_id) {
         return json_response(
             400,
@@ -582,7 +626,7 @@ fn safe_identifier(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
-fn json_response<T: Serialize>(status: u16, body: &T) -> Result<String, WebError> {
+fn json_response<T: Serialize>(status: u16, body: &T) -> Result<HttpResponse, WebError> {
     let status_text = match status {
         200 => "OK",
         202 => "Accepted",
@@ -593,14 +637,17 @@ fn json_response<T: Serialize>(status: u16, body: &T) -> Result<String, WebError
         503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
-    let body = serde_json::to_string(body)?;
-    Ok(format!(
-        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+    let body = serde_json::to_vec(body)?;
+    let mut response = format!(
+        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
-    ))
+    )
+    .into_bytes();
+    response.extend_from_slice(&body);
+    Ok(HttpResponse::new(response))
 }
 
-fn static_response(config: &ResolvedConfig, request_path: &str) -> Result<String, WebError> {
+fn static_response(config: &ResolvedConfig, request_path: &str) -> Result<HttpResponse, WebError> {
     let dist_dir = web_dist_dir(config);
     if !dist_dir.exists() {
         if request_path != "/" {
@@ -631,11 +678,13 @@ fn static_response(config: &ResolvedConfig, request_path: &str) -> Result<String
 
     let body = fs::read(&asset_path)?;
     let content_type = content_type(&asset_path);
-    Ok(format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        String::from_utf8_lossy(&body)
-    ))
+    let mut response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(&body);
+    Ok(HttpResponse::new(response))
 }
 
 fn web_dist_dir(config: &ResolvedConfig) -> PathBuf {
@@ -678,6 +727,16 @@ fn content_type(path: &Path) -> &'static str {
         Some("css") => "text/css; charset=utf-8",
         Some("js") => "application/javascript; charset=utf-8",
         Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("wasm") => "application/wasm",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
         Some("json") => "application/json; charset=utf-8",
         Some("html") | None => "text/html; charset=utf-8",
         _ => "application/octet-stream",
@@ -1150,6 +1209,23 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("text/html"));
         assert!(response.ends_with("<div id=\"root\"></div>"));
+    }
+
+    #[test]
+    fn static_assets_are_served_as_raw_bytes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        let dist = web_dist_dir(&config);
+        fs::create_dir_all(&dist).unwrap();
+        let asset = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00];
+        fs::write(dist.join("icon.png"), asset).unwrap();
+
+        let response = handle_request(&config, "GET /icon.png HTTP/1.1\r\n\r\n").unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("Content-Type: image/png"));
+        assert!(response.contains("Content-Length: 10"));
+        assert_eq!(response.body(), asset);
     }
 
     #[test]

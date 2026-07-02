@@ -251,7 +251,7 @@ function App() {
   );
 
   const markPrMerged = React.useCallback(
-    async (runId: string) => {
+    async (runId: string): Promise<PrMergedResponse> => {
       setMarkingMergedRunId(runId);
       setError(null);
       try {
@@ -262,10 +262,12 @@ function App() {
           const body = (await response.json().catch(() => null)) as { error?: string } | null;
           throw new Error(body?.error ?? `Merge update failed (${response.status})`);
         }
-        (await response.json()) as PrMergedResponse;
+        const result = (await response.json()) as PrMergedResponse;
         await loadBoard();
+        return result;
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : "Merge update failed");
+        throw cause;
       } finally {
         setMarkingMergedRunId(null);
       }
@@ -736,7 +738,7 @@ function TaskDetail({
   onClose: (origin?: HTMLElement) => void;
   onStart: (storyId: string) => Promise<void>;
   onSync: (runId: string) => Promise<void>;
-  onMarkPrMerged: (runId: string) => Promise<void>;
+  onMarkPrMerged: (runId: string) => Promise<PrMergedResponse>;
 }) {
   const [events, setEvents] = React.useState<RunEvent[]>([]);
   const [review, setReview] = React.useState<ReviewResponse | null>(null);
@@ -813,6 +815,19 @@ function TaskDetail({
 
   const isReady = item.board_state === "Ready";
   const isStarting = startingId === item.id;
+  const markReviewPrMerged = React.useCallback(
+    async (runId: string) => {
+      try {
+        const result = await onMarkPrMerged(runId);
+        setReview((current) =>
+          current?.run_id === result.run_id ? { ...current, pr_status: result.pr_status } : current
+        );
+      } catch {
+        // The parent action owns the visible error state.
+      }
+    },
+    [onMarkPrMerged]
+  );
 
   return (
     <aside
@@ -878,7 +893,7 @@ function TaskDetail({
             syncing={syncingRunId === review.run_id}
             markingMerged={markingMergedRunId === review.run_id}
             onSync={onSync}
-            onMarkPrMerged={onMarkPrMerged}
+            onMarkPrMerged={markReviewPrMerged}
           />
         </div>
       ) : null}
