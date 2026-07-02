@@ -239,6 +239,8 @@ impl RunStateStore {
         let connection = Connection::open(&self.path)?;
         let next_action = if pr_status == "merged" {
             "approve sync"
+        } else if pr_status == "failed" {
+            "retry pull request creation"
         } else {
             "review pull request"
         };
@@ -247,6 +249,21 @@ impl RunStateStore {
              SET pr_status=?1, next_action=?2, updated_at=datetime('now')
              WHERE run_id=?3;",
             params![pr_status, next_action, run_id],
+        )?;
+        if connection.changes() == 0 {
+            return Err(StateError::RunNotFound(run_id.to_owned()));
+        }
+        Ok(())
+    }
+
+    pub fn record_pr_failure(&self, run_id: &str, error: &str) -> Result<(), StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection.execute(
+            "UPDATE run_state
+             SET pr_status='failed', next_action=?1, updated_at=datetime('now')
+             WHERE run_id=?2;",
+            params![format!("pull request creation failed: {error}"), run_id],
         )?;
         if connection.changes() == 0 {
             return Err(StateError::RunNotFound(run_id.to_owned()));
@@ -593,6 +610,20 @@ mod tests {
         let run = store.show_run("run_1").unwrap();
         assert_eq!(run.pr_status, "merged");
         assert_eq!(run.next_action, "approve sync");
+    }
+
+    #[test]
+    fn records_pr_failure_without_changing_run_outcome() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = RunStateStore::new(temp_dir.path().join(".symphony/state.db"));
+
+        store.add_run(new_record("run_1", "completed")).unwrap();
+        store.record_pr_failure("run_1", "gh auth failed").unwrap();
+
+        let run = store.show_run("run_1").unwrap();
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.pr_status, "failed");
+        assert!(run.next_action.contains("gh auth failed"));
     }
 
     #[test]

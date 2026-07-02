@@ -395,11 +395,8 @@ fn spawn_run(config: ResolvedConfig, prepared: PreparedRun) {
 
 fn create_review_pr(config: &ResolvedConfig, run_id: &str) -> Result<(), WebError> {
     if let Err(error) = create_pr(config, run_id, false) {
-        RunStateStore::new(config.state_db.clone()).update_status(
-            run_id,
-            "failed",
-            &format!("pull request creation failed: {error}"),
-        )?;
+        RunStateStore::new(config.state_db.clone())
+            .record_pr_failure(run_id, &error.to_string())?;
         return Err(error.into());
     }
     Ok(())
@@ -1058,7 +1055,8 @@ mod tests {
 
         assert!(matches!(error, WebError::Pr(PrError::Disabled)));
         let run = store.show_run("run_pr_fail").unwrap();
-        assert_eq!(run.status, "failed");
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.pr_status, "failed");
         assert!(run.next_action.contains("pull request creation failed"));
     }
 

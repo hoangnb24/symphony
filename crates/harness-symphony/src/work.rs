@@ -470,6 +470,9 @@ fn derive_board_item(story: StoryRow, derivation: BoardDerivation<'_>) -> BoardI
             "completed" if run.pr_url.is_some() => {
                 (BoardState::Review, "review pull request".to_owned())
             }
+            "completed" if run.pr_status == "failed" => {
+                (BoardState::NeedsAttention, run.next_action.clone())
+            }
             "completed" => (
                 BoardState::NeedsAttention,
                 "completed run is missing required PR review artifact".to_owned(),
