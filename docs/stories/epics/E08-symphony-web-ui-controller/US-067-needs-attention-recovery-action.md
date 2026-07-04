@@ -2,7 +2,7 @@
 
 ## Status
 
-planned
+implemented
 
 ## Lane
 
@@ -89,4 +89,19 @@ actionable recovery state, not only a failure explanation state.
 
 ## Evidence
 
-Add commands, reports, screenshots, or links after validation exists.
+- Backend recovery metadata and guarded routes implemented in
+  `crates/harness-symphony/src/web.rs`:
+  `POST /api/tasks/<story-id>/recover` for execution retry and
+  `POST /api/runs/<run-id>/pr-retry` for PR retry.
+- Shared React controller renders retry-specific actions from backend
+  `recovery_action` fields and avoids generic Start controls for
+  `Needs Attention` recovery.
+- Validation passed:
+  `cargo test -p harness-symphony web -- --nocapture`;
+  `npm --prefix crates/harness-symphony/web-ui run build`;
+  `npm --prefix crates/harness-symphony/web-ui run e2e`;
+  `cargo fmt --check`;
+  `git diff --check`;
+  `cargo test --workspace`;
+  `cargo clippy --workspace -- -D warnings`;
+  `npm --prefix crates/harness-symphony/web-ui run desktop:smoke`.

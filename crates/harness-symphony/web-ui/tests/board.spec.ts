@@ -16,7 +16,8 @@ function boardItem(id: string, title: string, board_state: string) {
     run_id: null,
     active_run: null,
     reason: board_state === "Ready" ? "ready" : "story visible on the board",
-    failure_summary: null
+    failure_summary: null,
+    recovery_action: null
   };
 }
 
@@ -291,6 +292,173 @@ test("needs attention tasks show failure reason and evidence", async ({ page }) 
   await expect(detail.getByText("turn/completed status failed").first()).toBeVisible();
   await expect(detail.getByText(".harness/runs/run_timeout/APP_SERVER_EVENTS.jsonl").first()).toBeVisible();
   await expect(detail.getByText("Inspect APP_SERVER_EVENTS.jsonl and retry when safe.").first()).toBeVisible();
+});
+
+test("execution recovery retries needs attention work and preserves failed evidence", async ({ page }) => {
+  const failureSummary = {
+    category: "Codex run failure",
+    reason: "Codex turn failed.",
+    latest_event: "turn/completed status failed",
+    latest_error: "Codex turn failed.",
+    run_id: "run_failed",
+    evidence_artifacts: [".harness/runs/run_failed/APP_SERVER_EVENTS.jsonl"],
+    next_action: "Inspect APP_SERVER_EVENTS.jsonl and retry when safe."
+  };
+  const recoveryAction = {
+    kind: "execution_retry",
+    label: "Retry work",
+    endpoint: "/api/tasks/US-067/recover",
+    confirmation: "Start a new Symphony run for this task? The failed run evidence stays available."
+  };
+  let recovered = false;
+
+  page.on("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Start a new Symphony run");
+    await dialog.accept();
+  });
+  await page.route("**/api/board", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            ...boardItem("US-067", "Needs Attention Recovery Action", recovered ? "In Progress" : "Needs Attention"),
+            run_id: recovered ? "run_recovery" : "run_failed",
+            active_run: recovered ? "run_recovery" : null,
+            reason: recovered ? "active run run_recovery" : failureSummary.reason,
+            failure_summary: recovered ? null : failureSummary,
+            recovery_action: recovered ? null : recoveryAction
+          }
+        ]
+      })
+    });
+  });
+  await page.route("**/api/runs/run_failed/review", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        run_id: "run_failed",
+        story_id: "US-067",
+        status: "failed",
+        outcome: "failed",
+        summary: null,
+        result: null,
+        validation: null,
+        changed_files: [],
+        changeset_preview: null,
+        pr_url: null,
+        pr_status: "missing",
+        artifact_paths: failureSummary.evidence_artifacts,
+        suggested_next_action: failureSummary.next_action,
+        failure_summary: failureSummary,
+        recovery_action: recoveryAction,
+        events: []
+      })
+    });
+  });
+  await page.route("**/api/tasks/US-067/recover", async (route) => {
+    recovered = true;
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ run_id: "run_recovery", story_id: "US-067", status: "recovering" })
+    });
+  });
+  await page.route("**/api/runs/run_recovery/events", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ run_id: "run_recovery", events: [] }) });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /US-067/ }).click();
+  const detail = page.getByRole("dialog", { name: "Selected work detail" });
+
+  await expect(detail.getByRole("button", { name: "Retry work" })).toBeVisible();
+  await detail.getByRole("button", { name: "Retry work" }).click();
+
+  await expect(page.getByRole("button", { name: /US-067/ })).toContainText("active");
+  await expect(detail.getByText(".harness/runs/run_failed/APP_SERVER_EVENTS.jsonl").first()).toBeVisible();
+});
+
+test("pr retry recovers completed needs attention runs without rerunning work", async ({ page }) => {
+  const failureSummary = {
+    category: "PR creation failure",
+    reason: "pull request creation failed: gh auth failed",
+    latest_event: null,
+    latest_error: "pull request creation failed: gh auth failed",
+    run_id: "run_pr_failed",
+    evidence_artifacts: [".harness/runs/run_pr_failed/SUMMARY.md"],
+    next_action: "Retry pull request creation after fixing the reported PR error."
+  };
+  const recoveryAction = {
+    kind: "pr_retry",
+    label: "Retry PR creation",
+    endpoint: "/api/runs/run_pr_failed/pr-retry",
+    confirmation: "Retry pull request creation for this completed run?"
+  };
+  let prCreated = false;
+
+  page.on("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Retry pull request creation");
+    await dialog.accept();
+  });
+  await page.route("**/api/board", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            ...boardItem("US-067", "Needs Attention Recovery Action", prCreated ? "Review" : "Needs Attention"),
+            run_id: "run_pr_failed",
+            reason: prCreated ? "review pull request" : failureSummary.reason,
+            failure_summary: prCreated ? null : failureSummary,
+            recovery_action: prCreated ? null : recoveryAction
+          }
+        ]
+      })
+    });
+  });
+  await page.route("**/api/runs/run_pr_failed/review", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        run_id: "run_pr_failed",
+        story_id: "US-067",
+        status: "completed",
+        outcome: "completed",
+        summary: "Completed work, PR failed.",
+        result: null,
+        validation: null,
+        changed_files: [],
+        changeset_preview: null,
+        pr_url: prCreated ? "https://example.test/pr/67" : null,
+        pr_status: prCreated ? "created" : "failed",
+        artifact_paths: failureSummary.evidence_artifacts,
+        suggested_next_action: prCreated ? "Review pull request." : failureSummary.next_action,
+        failure_summary: prCreated ? null : failureSummary,
+        recovery_action: prCreated ? null : recoveryAction,
+        events: []
+      })
+    });
+  });
+  await page.route("**/api/runs/run_pr_failed/pr-retry", async (route) => {
+    prCreated = true;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ run_id: "run_pr_failed", pr_status: "created", pr_url: "https://example.test/pr/67" })
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /US-067/ }).click();
+  const detail = page.getByRole("dialog", { name: "Selected work detail" });
+
+  await expect(detail.getByRole("button", { name: "Retry PR creation" })).toBeVisible();
+  await expect(detail.getByRole("button", { name: /Start/ })).toHaveCount(0);
+  await detail.getByRole("button", { name: "Retry PR creation" }).click();
+
+  await expect(detail.getByText("https://example.test/pr/67")).toBeVisible();
+  await expect(detail.getByRole("button", { name: "Mark Merged" })).toBeEnabled();
 });
 
 test("review logs render readable chat and progress entries while preserving raw artifacts", async ({ page }) => {

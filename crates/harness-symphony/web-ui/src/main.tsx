@@ -48,6 +48,7 @@ type BoardItem = {
   active_run: string | null;
   reason: string;
   failure_summary: FailureSummary | null;
+  recovery_action: RecoveryAction | null;
 };
 
 type BoardResponse = {
@@ -77,6 +78,7 @@ type ReviewResponse = {
   events: RunEvent[];
   suggested_next_action: string;
   failure_summary: FailureSummary | null;
+  recovery_action: RecoveryAction | null;
 };
 
 type FailureSummary = {
@@ -89,6 +91,13 @@ type FailureSummary = {
   next_action: string;
 };
 
+type RecoveryAction = {
+  kind: "execution_retry" | "pr_retry";
+  label: string;
+  endpoint: string;
+  confirmation: string;
+};
+
 type SyncResponse = {
   run_id: string;
   applied: boolean;
@@ -97,6 +106,12 @@ type SyncResponse = {
 type PrMergedResponse = {
   run_id: string;
   pr_status: string;
+};
+
+type PrRetryResponse = {
+  run_id: string;
+  pr_status: string;
+  pr_url: string | null;
 };
 
 type ConfettiBurst = {
@@ -140,8 +155,10 @@ function App() {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [startingId, setStartingId] = React.useState<string | null>(null);
+  const [recoveringId, setRecoveringId] = React.useState<string | null>(null);
   const [syncingRunId, setSyncingRunId] = React.useState<string | null>(null);
   const [markingMergedRunId, setMarkingMergedRunId] = React.useState<string | null>(null);
+  const [retryingPrRunId, setRetryingPrRunId] = React.useState<string | null>(null);
   const confettiBurstIdRef = React.useRef(0);
   const prefersReducedMotion = usePrefersReducedMotion();
 
@@ -236,6 +253,31 @@ function App() {
     [loadBoard]
   );
 
+  const recoverTask = React.useCallback(
+    async (storyId: string, action: RecoveryAction) => {
+      if (!window.confirm(action.confirmation)) {
+        return;
+      }
+      setRecoveringId(storyId);
+      setError(null);
+      try {
+        const response = await fetch(action.endpoint, {
+          method: "POST"
+        });
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(body?.error ?? `Recovery failed (${response.status})`);
+        }
+        await loadBoard();
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Recovery failed");
+      } finally {
+        setRecoveringId(null);
+      }
+    },
+    [loadBoard]
+  );
+
   const syncRun = React.useCallback(
     async (runId: string) => {
       setSyncingRunId(runId);
@@ -282,6 +324,34 @@ function App() {
         throw cause;
       } finally {
         setMarkingMergedRunId(null);
+      }
+    },
+    [loadBoard]
+  );
+
+  const retryPr = React.useCallback(
+    async (runId: string, action: RecoveryAction): Promise<PrRetryResponse> => {
+      if (!window.confirm(action.confirmation)) {
+        throw new Error("PR retry cancelled");
+      }
+      setRetryingPrRunId(runId);
+      setError(null);
+      try {
+        const response = await fetch(action.endpoint, {
+          method: "POST"
+        });
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(body?.error ?? `PR retry failed (${response.status})`);
+        }
+        const result = (await response.json()) as PrRetryResponse;
+        await loadBoard();
+        return result;
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "PR retry failed");
+        throw cause;
+      } finally {
+        setRetryingPrRunId(null);
       }
     },
     [loadBoard]
@@ -342,12 +412,16 @@ function App() {
               <TaskDetail
                 item={selected}
                 startingId={startingId}
+                recoveringId={recoveringId}
                 syncingRunId={syncingRunId}
                 markingMergedRunId={markingMergedRunId}
+                retryingPrRunId={retryingPrRunId}
                 onClose={closeSelectedTask}
                 onStart={startTask}
+                onRecover={recoverTask}
                 onSync={syncRun}
                 onMarkPrMerged={markPrMerged}
+                onRetryPr={retryPr}
               />
             </TaskDetailOverlay>
           ) : null}
@@ -742,21 +816,29 @@ function ConfettiBurstHost({
 function TaskDetail({
   item,
   startingId,
+  recoveringId,
   syncingRunId,
   markingMergedRunId,
+  retryingPrRunId,
   onClose,
   onStart,
+  onRecover,
   onSync,
-  onMarkPrMerged
+  onMarkPrMerged,
+  onRetryPr
 }: {
   item: BoardItem;
   startingId: string | null;
+  recoveringId: string | null;
   syncingRunId: string | null;
   markingMergedRunId: string | null;
+  retryingPrRunId: string | null;
   onClose: (origin?: HTMLElement) => void;
   onStart: (storyId: string) => Promise<void>;
+  onRecover: (storyId: string, action: RecoveryAction) => Promise<void>;
   onSync: (runId: string) => Promise<void>;
   onMarkPrMerged: (runId: string) => Promise<PrMergedResponse>;
+  onRetryPr: (runId: string, action: RecoveryAction) => Promise<PrRetryResponse>;
 }) {
   const [events, setEvents] = React.useState<RunEvent[]>([]);
   const [review, setReview] = React.useState<ReviewResponse | null>(null);
@@ -804,7 +886,9 @@ function TaskDetail({
     let cancelled = false;
     const runId = item.run_id ?? item.active_run;
     if (!runId || !["Review", "Needs Attention", "Done"].includes(item.board_state)) {
-      setReview(null);
+      setReview((current) =>
+        item.board_state === "In Progress" && item.active_run && current?.failure_summary ? current : null
+      );
       return;
     }
     const reviewRunId = runId;
@@ -833,6 +917,9 @@ function TaskDetail({
 
   const isReady = item.board_state === "Ready";
   const isStarting = startingId === item.id;
+  const executionRecovery = item.recovery_action?.kind === "execution_retry" ? item.recovery_action : null;
+  const isRecovering = recoveringId === item.id;
+  const needsAttention = item.board_state === "Needs Attention";
   const markReviewPrMerged = React.useCallback(
     async (runId: string) => {
       try {
@@ -845,6 +932,21 @@ function TaskDetail({
       }
     },
     [onMarkPrMerged]
+  );
+  const retryReviewPr = React.useCallback(
+    async (runId: string, action: RecoveryAction) => {
+      try {
+        const result = await onRetryPr(runId, action);
+        setReview((current) =>
+          current?.run_id === result.run_id
+            ? { ...current, pr_status: result.pr_status, pr_url: result.pr_url }
+            : current
+        );
+      } catch {
+        // The parent action owns the visible error state.
+      }
+    },
+    [onRetryPr]
   );
 
   return (
@@ -883,14 +985,30 @@ function TaskDetail({
           <Field label="Children" value={item.children.length > 0 ? item.children.join(", ") : "none"} />
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button
-            disabled={!isReady || isStarting}
-            title={isReady ? "Start task" : "Blocked tasks cannot start"}
-            onClick={() => void onStart(item.id)}
-          >
-            {isStarting ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" />}
-            {isReady ? "Start work" : item.board_state === "In Progress" ? "One run active" : "Start blocked"}
-          </Button>
+          {executionRecovery ? (
+            <Button disabled={isRecovering} title={executionRecovery.confirmation} onClick={() => void onRecover(item.id, executionRecovery)}>
+              {isRecovering ? (
+                <Loader2 data-icon="inline-start" className="animate-spin" />
+              ) : (
+                <RefreshCw data-icon="inline-start" />
+              )}
+              {executionRecovery.label}
+            </Button>
+          ) : needsAttention ? (
+            <Button variant="outline" disabled title="Use the recovery action in review evidence">
+              <ShieldAlert data-icon="inline-start" />
+              Recovery unavailable
+            </Button>
+          ) : (
+            <Button
+              disabled={!isReady || isStarting}
+              title={isReady ? "Start task" : "Blocked tasks cannot start"}
+              onClick={() => void onStart(item.id)}
+            >
+              {isStarting ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" />}
+              {isReady ? "Start work" : item.board_state === "In Progress" ? "One run active" : "Start blocked"}
+            </Button>
+          )}
           <Button variant="secondary">
             <Clock3 data-icon="inline-start" />
             Open artifacts
@@ -911,8 +1029,10 @@ function TaskDetail({
             review={review}
             syncing={syncingRunId === review.run_id}
             markingMerged={markingMergedRunId === review.run_id}
+            retryingPr={retryingPrRunId === review.run_id}
             onSync={onSync}
             onMarkPrMerged={markReviewPrMerged}
+            onRetryPr={retryReviewPr}
           />
         </div>
       ) : null}
@@ -939,17 +1059,22 @@ function ReviewPanel({
   review,
   syncing,
   markingMerged,
+  retryingPr,
   onSync,
-  onMarkPrMerged
+  onMarkPrMerged,
+  onRetryPr
 }: {
   review: ReviewResponse;
   syncing: boolean;
   markingMerged: boolean;
+  retryingPr: boolean;
   onSync: (runId: string) => Promise<void>;
   onMarkPrMerged: (runId: string) => Promise<void>;
+  onRetryPr: (runId: string, action: RecoveryAction) => Promise<void>;
 }) {
   const canMarkMerged = review.pr_status === "created" && review.pr_url !== null;
   const canSync = review.pr_status === "merged" && review.status === "completed";
+  const prRecovery = review.recovery_action?.kind === "pr_retry" ? review.recovery_action : null;
 
   return (
     <div className="flex flex-col gap-3">
@@ -987,6 +1112,16 @@ function ReviewPanel({
 
       <Separator />
       <div className="flex flex-wrap gap-2">
+        {prRecovery ? (
+          <Button variant="outline" disabled={retryingPr} onClick={() => void onRetryPr(review.run_id, prRecovery)}>
+            {retryingPr ? (
+              <Loader2 data-icon="inline-start" className="animate-spin" />
+            ) : (
+              <GitPullRequestArrow data-icon="inline-start" />
+            )}
+            {prRecovery.label}
+          </Button>
+        ) : null}
         <Button variant="outline" disabled={!canMarkMerged || markingMerged} onClick={() => void onMarkPrMerged(review.run_id)}>
           {markingMerged ? (
             <Loader2 data-icon="inline-start" className="animate-spin" />

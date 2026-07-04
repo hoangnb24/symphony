@@ -13,7 +13,7 @@ use crate::pr::{create_pr, PrError};
 use crate::run::{execute_prepared_run, prepare_run, PreparedRun, RunError};
 use crate::state::{RunStateStore, StateError};
 use crate::sync::{sync_changeset, SyncChange, SyncError};
-use crate::work::{list_board, BoardItem, WorkError};
+use crate::work::{list_board, BoardItem, BoardState, WorkError};
 
 const WEB_DIST_DIR_ENV: &str = "HARNESS_SYMPHONY_WEB_DIST_DIR";
 
@@ -108,6 +108,7 @@ struct BoardItemResponse {
     active_run: Option<String>,
     reason: String,
     failure_summary: Option<FailureSummary>,
+    recovery_action: Option<RecoveryAction>,
 }
 
 #[derive(Debug, Serialize)]
@@ -120,6 +121,13 @@ struct StartRunResponse {
     run_id: String,
     story_id: String,
     status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PrRetryResponse {
+    run_id: String,
+    pr_status: String,
+    pr_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,6 +153,7 @@ struct ReviewResponse {
     events: Vec<Value>,
     suggested_next_action: String,
     failure_summary: Option<FailureSummary>,
+    recovery_action: Option<RecoveryAction>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +165,14 @@ struct FailureSummary {
     run_id: String,
     evidence_artifacts: Vec<String>,
     next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct RecoveryAction {
+    kind: String,
+    label: String,
+    endpoint: String,
+    confirmation: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -225,6 +242,10 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse
             let story_id = start_path_story_id(path).unwrap_or_default();
             start_run_response(config, &story_id)
         }
+        (Some("POST"), Some(path)) if recover_path_story_id(path).is_some() => {
+            let story_id = recover_path_story_id(path).unwrap_or_default();
+            recover_run_response(config, &story_id)
+        }
         (Some("GET"), Some(path)) if events_path_run_id(path).is_some() => {
             let run_id = events_path_run_id(path).unwrap_or_default();
             events_response(config, &run_id)
@@ -241,6 +262,10 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse
             let run_id = pr_merged_path_run_id(path).unwrap_or_default();
             pr_merged_response(config, &run_id)
         }
+        (Some("POST"), Some(path)) if pr_retry_path_run_id(path).is_some() => {
+            let run_id = pr_retry_path_run_id(path).unwrap_or_default();
+            pr_retry_response(config, &run_id)
+        }
         (Some("GET"), Some(path)) => static_response(config, path),
         (Some(_), Some("/health" | "/api/board")) => json_response(
             405,
@@ -250,10 +275,12 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse
         ),
         (Some(_), Some(path))
             if start_path_story_id(path).is_some()
+                || recover_path_story_id(path).is_some()
                 || events_path_run_id(path).is_some()
                 || review_path_run_id(path).is_some()
                 || sync_path_run_id(path).is_some()
-                || pr_merged_path_run_id(path).is_some() =>
+                || pr_merged_path_run_id(path).is_some()
+                || pr_retry_path_run_id(path).is_some() =>
         {
             json_response(
                 405,
@@ -266,6 +293,78 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse
             404,
             &ErrorResponse {
                 error: "not found".to_owned(),
+            },
+        ),
+    }
+}
+
+fn recover_run_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpResponse, WebError> {
+    let item = match list_board(&config.harness_db, &config.state_db)?
+        .into_iter()
+        .find(|item| item.id == story_id)
+    {
+        Some(item) => item,
+        None => {
+            return json_response(
+                404,
+                &ErrorResponse {
+                    error: "story not found".to_owned(),
+                },
+            );
+        }
+    };
+    let run_id = match item.run_id.as_deref() {
+        Some(run_id) => run_id,
+        None => {
+            return json_response(
+                409,
+                &ErrorResponse {
+                    error: "latest story state is not recoverable".to_owned(),
+                },
+            );
+        }
+    };
+    let store = RunStateStore::new(config.state_db.clone());
+    let run = store.show_run(run_id)?;
+    if recovery_action_for_run(&item.id, &item.story_status, &item.board_state, &run)
+        .as_ref()
+        .is_none_or(|action| action.kind != "execution_retry")
+    {
+        return json_response(
+            409,
+            &ErrorResponse {
+                error: "latest story state is not recoverable by execution retry".to_owned(),
+            },
+        );
+    }
+    if let Some(active) = store.active_run()? {
+        return json_response(
+            409,
+            &ErrorResponse {
+                error: format!("active run already exists: {}", active.run_id),
+            },
+        );
+    }
+    match prepare_run(config, story_id) {
+        Ok(prepared) => {
+            let response = StartRunResponse {
+                run_id: prepared.run_id.clone(),
+                story_id: prepared.story_id.clone(),
+                status: "recovering".to_owned(),
+            };
+            spawn_run(config.clone(), prepared);
+            json_response(202, &response)
+        }
+        Err(RunError::State(StateError::ActiveRunExists(run_id))) => json_response(
+            409,
+            &ErrorResponse {
+                error: format!("active run already exists: {run_id}"),
+            },
+        ),
+        Err(error) => json_response(
+            400,
+            &ErrorResponse {
+                error: error.to_string(),
             },
         ),
     }
@@ -354,6 +453,67 @@ fn pr_merged_response(config: &ResolvedConfig, run_id: &str) -> Result<HttpRespo
         ),
         Err(error) => Err(error.into()),
     }
+}
+
+fn pr_retry_response(config: &ResolvedConfig, run_id: &str) -> Result<HttpResponse, WebError> {
+    if !safe_identifier(run_id) {
+        return json_response(
+            400,
+            &ErrorResponse {
+                error: "invalid run id".to_owned(),
+            },
+        );
+    }
+    let store = RunStateStore::new(config.state_db.clone());
+    let run = match store.show_run(run_id) {
+        Ok(run) => run,
+        Err(StateError::RunNotFound(_)) => {
+            return json_response(
+                404,
+                &ErrorResponse {
+                    error: "run not found".to_owned(),
+                },
+            );
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(active) = store.active_run()? {
+        return json_response(
+            409,
+            &ErrorResponse {
+                error: format!("active run already exists: {}", active.run_id),
+            },
+        );
+    }
+    let action = recovery_action_for_review(config, &run)?;
+    if action
+        .as_ref()
+        .is_none_or(|action| action.kind != "pr_retry")
+    {
+        return json_response(
+            409,
+            &ErrorResponse {
+                error: "run is not recoverable by PR retry".to_owned(),
+            },
+        );
+    }
+    if let Err(error) = create_review_pr(config, run_id) {
+        return json_response(
+            409,
+            &ErrorResponse {
+                error: error.to_string(),
+            },
+        );
+    }
+    let updated = store.show_run(run_id)?;
+    json_response(
+        200,
+        &PrRetryResponse {
+            run_id: run_id.to_owned(),
+            pr_status: updated.pr_status,
+            pr_url: updated.pr_url,
+        },
+    )
 }
 
 fn start_run_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpResponse, WebError> {
@@ -512,6 +672,7 @@ fn review_response(config: &ResolvedConfig, run_id: &str) -> Result<HttpResponse
     let suggested_next_action = review_next_action(&run, summary.is_some(), result.is_some());
     let events = read_events(&event_path)?;
     let failure_summary = failure_summary_for_run(config, &run);
+    let recovery_action = recovery_action_for_review(config, &run)?;
 
     json_response(
         200,
@@ -531,6 +692,7 @@ fn review_response(config: &ResolvedConfig, run_id: &str) -> Result<HttpResponse
             events,
             suggested_next_action,
             failure_summary,
+            recovery_action,
         },
     )
 }
@@ -773,6 +935,81 @@ fn run_needs_attention(run: &crate::state::RunRecord) -> bool {
     ) || (run.status == "completed" && (run.pr_status == "failed" || run.pr_url.is_none()))
 }
 
+fn recovery_action_for_review(
+    config: &ResolvedConfig,
+    run: &crate::state::RunRecord,
+) -> Result<Option<RecoveryAction>, WebError> {
+    let items = match list_board(&config.harness_db, &config.state_db) {
+        Ok(items) => items,
+        Err(WorkError::MissingDatabase(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let item = items.into_iter().find(|item| item.id == run.story_id);
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    if item.run_id.as_deref() != Some(run.run_id.as_str()) {
+        return Ok(None);
+    }
+    Ok(recovery_action_for_run(
+        &item.id,
+        &item.story_status,
+        &item.board_state,
+        run,
+    ))
+}
+
+fn recovery_action_for_run(
+    story_id: &str,
+    story_status: &str,
+    board_state: &BoardState,
+    run: &crate::state::RunRecord,
+) -> Option<RecoveryAction> {
+    if *board_state != BoardState::NeedsAttention {
+        return None;
+    }
+    if pr_retryable_run(run) {
+        return Some(RecoveryAction {
+            kind: "pr_retry".to_owned(),
+            label: "Retry PR creation".to_owned(),
+            endpoint: format!("/api/runs/{}/pr-retry", run.run_id),
+            confirmation: "Retry pull request creation for this completed run?".to_owned(),
+        });
+    }
+    if execution_retryable_run(run) && matches!(story_status, "planned" | "in_progress") {
+        return Some(RecoveryAction {
+            kind: "execution_retry".to_owned(),
+            label: "Retry work".to_owned(),
+            endpoint: format!("/api/tasks/{story_id}/recover"),
+            confirmation:
+                "Start a new Symphony run for this task? The failed run evidence stays available."
+                    .to_owned(),
+        });
+    }
+    None
+}
+
+fn execution_retryable_run(run: &crate::state::RunRecord) -> bool {
+    matches!(
+        run.status.as_str(),
+        "failed" | "cancelled" | "partial" | "blocked" | "needs_intake" | "interrupted"
+    )
+}
+
+fn pr_retryable_run(run: &crate::state::RunRecord) -> bool {
+    run.status == "completed"
+        && !is_synced(run)
+        && run.pr_url.is_none()
+        && matches!(run.pr_status.as_str(), "failed" | "missing")
+}
+
+fn is_synced(run: &crate::state::RunRecord) -> bool {
+    matches!(
+        run.sync_status.as_str(),
+        "applied" | "synced" | "synced_locally"
+    )
+}
+
 fn available_artifacts(config: &ResolvedConfig, paths: &RunArtifactPaths) -> Vec<String> {
     [
         &paths.summary,
@@ -914,6 +1151,12 @@ fn start_path_story_id(path: &str) -> Option<String> {
     safe_identifier(story_id).then(|| story_id.to_owned())
 }
 
+fn recover_path_story_id(path: &str) -> Option<String> {
+    let path = path.trim_end_matches('/');
+    let story_id = path.strip_prefix("/api/tasks/")?.strip_suffix("/recover")?;
+    safe_identifier(story_id).then(|| story_id.to_owned())
+}
+
 fn events_path_run_id(path: &str) -> Option<String> {
     let path = path.trim_end_matches('/');
     let run_id = path.strip_prefix("/api/runs/")?.strip_suffix("/events")?;
@@ -937,6 +1180,12 @@ fn pr_merged_path_run_id(path: &str) -> Option<String> {
     let run_id = path
         .strip_prefix("/api/runs/")?
         .strip_suffix("/pr-merged")?;
+    safe_identifier(run_id).then(|| run_id.to_owned())
+}
+
+fn pr_retry_path_run_id(path: &str) -> Option<String> {
+    let path = path.trim_end_matches('/');
+    let run_id = path.strip_prefix("/api/runs/")?.strip_suffix("/pr-retry")?;
     safe_identifier(run_id).then(|| run_id.to_owned())
 }
 
@@ -1066,11 +1315,16 @@ fn content_type(path: &Path) -> &'static str {
 
 impl BoardItemResponse {
     fn from_item(config: &ResolvedConfig, item: BoardItem) -> Self {
-        let failure_summary = item.run_id.as_deref().and_then(|run_id| {
+        let run = item.run_id.as_deref().and_then(|run_id| {
             RunStateStore::new(config.state_db.clone())
                 .show_run(run_id)
                 .ok()
-                .and_then(|run| failure_summary_for_run(config, &run))
+        });
+        let failure_summary = run
+            .as_ref()
+            .and_then(|run| failure_summary_for_run(config, run));
+        let recovery_action = run.as_ref().and_then(|run| {
+            recovery_action_for_run(&item.id, &item.story_status, &item.board_state, run)
         });
         let reason = failure_summary
             .as_ref()
@@ -1092,6 +1346,7 @@ impl BoardItemResponse {
             active_run: item.active_run,
             reason,
             failure_summary,
+            recovery_action,
         }
     }
 }
@@ -1114,6 +1369,9 @@ mod tests {
     use rusqlite::{params, Connection};
     use std::fs;
     use std::process::Command;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn test_config(temp_dir: &tempfile::TempDir) -> ResolvedConfig {
         SymphonyConfig::default().resolve(temp_dir.path())
@@ -1205,6 +1463,24 @@ mod tests {
                 next_action: "inspect run".to_owned(),
             })
             .unwrap();
+    }
+
+    fn test_run_record(status: &str) -> crate::state::RunRecord {
+        crate::state::RunRecord {
+            run_id: format!("run_{status}"),
+            story_id: "US-ATTN".to_owned(),
+            branch: Some(format!("symphony/run_{status}")),
+            worktree: PathBuf::from(format!(".symphony/worktrees/run_{status}")),
+            lightweight: false,
+            status: status.to_owned(),
+            result_path: Some(PathBuf::from(format!(
+                ".harness/runs/run_{status}/RESULT.json"
+            ))),
+            pr_url: None,
+            pr_status: "missing".to_owned(),
+            sync_status: "not_applied".to_owned(),
+            next_action: "inspect run".to_owned(),
+        }
     }
 
     fn write_summary(config: &ResolvedConfig, run_id: &str) {
@@ -1446,6 +1722,52 @@ mod tests {
     }
 
     #[test]
+    fn recovery_action_marks_retryable_execution_and_pr_failures() {
+        for status in [
+            "failed",
+            "cancelled",
+            "partial",
+            "blocked",
+            "needs_intake",
+            "interrupted",
+        ] {
+            let run = test_run_record(status);
+            let action =
+                recovery_action_for_run("US-ATTN", "planned", &BoardState::NeedsAttention, &run)
+                    .unwrap();
+            assert_eq!(action.kind, "execution_retry");
+            assert!(action.endpoint.ends_with("/api/tasks/US-ATTN/recover"));
+        }
+
+        let mut pr_run = test_run_record("completed");
+        pr_run.pr_status = "failed".to_owned();
+        let action =
+            recovery_action_for_run("US-ATTN", "planned", &BoardState::NeedsAttention, &pr_run)
+                .unwrap();
+        assert_eq!(action.kind, "pr_retry");
+        assert!(action
+            .endpoint
+            .ends_with("/api/runs/run_completed/pr-retry"));
+
+        let mut review_run = test_run_record("completed");
+        review_run.pr_url = Some("https://example.test/pr/1".to_owned());
+        review_run.pr_status = "created".to_owned();
+        assert!(
+            recovery_action_for_run("US-ATTN", "planned", &BoardState::Review, &review_run)
+                .is_none()
+        );
+
+        let implemented_run = test_run_record("failed");
+        assert!(recovery_action_for_run(
+            "US-ATTN",
+            "implemented",
+            &BoardState::NeedsAttention,
+            &implemented_run
+        )
+        .is_none());
+    }
+
+    #[test]
     fn review_request_explains_malformed_event_log() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = test_config(&temp_dir);
@@ -1516,6 +1838,186 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains(r#""pr_status":"merged""#));
         assert_eq!(store.show_run("run_merge").unwrap().pr_status, "merged");
+    }
+
+    #[test]
+    fn recover_request_prepares_new_run_without_rewriting_failed_run() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        init_git_repo(temp_dir.path());
+        let mut config = test_config(&temp_dir);
+        config.agent_adapter = "custom".to_owned();
+        config.agent_command = vec!["sh".to_owned(), "-c".to_owned(), "sleep 1".to_owned()];
+        seed_runnable_story(&config.harness_db, "US-ATTN");
+        add_test_run(&config, "run_failed", "failed");
+
+        let response =
+            handle_request(&config, "POST /api/tasks/US-ATTN/recover HTTP/1.1\r\n\r\n").unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 202 Accepted"));
+        assert!(response.contains(r#""story_id":"US-ATTN""#));
+        assert_eq!(
+            RunStateStore::new(config.state_db.clone())
+                .show_run("run_failed")
+                .unwrap()
+                .status,
+            "failed"
+        );
+        let runs = RunStateStore::new(config.state_db.clone())
+            .list_runs()
+            .unwrap();
+        assert!(runs.iter().any(|run| run.run_id == "run_failed"));
+        assert!(runs
+            .iter()
+            .any(|run| run.story_id == "US-ATTN" && run.run_id != "run_failed"));
+    }
+
+    #[test]
+    fn recover_request_refuses_review_done_and_active_conflicts() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        init_git_repo(temp_dir.path());
+        let config = test_config(&temp_dir);
+        seed_runnable_story(&config.harness_db, "US-ATTN");
+        add_test_run(&config, "run_review", "completed");
+        let store = RunStateStore::new(config.state_db.clone());
+        store
+            .update_pr_url("run_review", "https://example.test/pr/1")
+            .unwrap();
+
+        let review =
+            handle_request(&config, "POST /api/tasks/US-ATTN/recover HTTP/1.1\r\n\r\n").unwrap();
+        assert!(review.starts_with("HTTP/1.1 409 Conflict"));
+        assert!(review.contains("not recoverable"));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        init_git_repo(temp_dir.path());
+        let config = test_config(&temp_dir);
+        seed_runnable_story(&config.harness_db, "US-ATTN");
+        add_test_run(&config, "run_failed", "failed");
+        RunStateStore::new(config.state_db.clone())
+            .add_run(crate::state::NewRunRecord {
+                run_id: "run_active".to_owned(),
+                story_id: "US-OTHER".to_owned(),
+                branch: Some("symphony/run_active".to_owned()),
+                worktree: temp_dir.path().join("worktree"),
+                lightweight: false,
+                status: "running".to_owned(),
+                result_path: None,
+                sync_status: "not_applied".to_owned(),
+                next_action: "wait".to_owned(),
+            })
+            .unwrap();
+
+        let active =
+            handle_request(&config, "POST /api/tasks/US-ATTN/recover HTTP/1.1\r\n\r\n").unwrap();
+        assert!(active.starts_with("HTTP/1.1 409 Conflict"));
+        assert!(active.contains("active run already exists"));
+    }
+
+    #[test]
+    fn pr_retry_endpoint_reuses_pr_creation_and_updates_review_state() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        init_git_repo(temp_dir.path());
+        let origin = temp_dir.path().join("origin.git");
+        let output = Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&origin)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let output = Command::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(&origin)
+            .current_dir(temp_dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let worktree = temp_dir.path().join(".symphony/worktrees/run_pr_retry");
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        let output = Command::new("git")
+            .args(["worktree", "add", "-b", "symphony/run_pr_retry"])
+            .arg(&worktree)
+            .arg("HEAD")
+            .current_dir(temp_dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let mut config = test_config(&temp_dir);
+        config.pull_request_create = "ask".to_owned();
+        seed_runnable_story(&config.harness_db, "US-PR");
+        fs::create_dir_all(config.runs_dir.join("run_pr_retry")).unwrap();
+        fs::write(
+            config.runs_dir.join("run_pr_retry/SUMMARY.md"),
+            "# Summary\n\nReady for PR.\n",
+        )
+        .unwrap();
+        fs::write(
+            config.runs_dir.join("run_pr_retry/RESULT.json"),
+            r#"{"version":1,"run_id":"run_pr_retry","story_id":"US-PR","outcome":"completed","validation":{"commands":[{"command":"cargo test","result":"pass"}]}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(worktree.join(".harness/changesets")).unwrap();
+        fs::write(
+            worktree.join(".harness/changesets/run_pr_retry.changeset.jsonl"),
+            r#"{"op":"changeset.header","version":1,"run_id":"run_pr_retry"}
+{"op":"story.update","version":1,"id":"US-PR","payload":{"status":"implemented"}}"#,
+        )
+        .unwrap();
+        let store = RunStateStore::new(config.state_db.clone());
+        store
+            .add_run(crate::state::NewRunRecord {
+                run_id: "run_pr_retry".to_owned(),
+                story_id: "US-PR".to_owned(),
+                branch: Some("symphony/run_pr_retry".to_owned()),
+                worktree: worktree.clone(),
+                lightweight: false,
+                status: "completed".to_owned(),
+                result_path: Some(PathBuf::from(".harness/runs/run_pr_retry/RESULT.json")),
+                sync_status: "not_applied".to_owned(),
+                next_action: "retry pull request creation".to_owned(),
+            })
+            .unwrap();
+        store
+            .record_pr_failure("run_pr_retry", "gh auth failed")
+            .unwrap();
+
+        let bin_dir = temp_dir.path().join("fake-bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let gh = bin_dir.join("gh");
+        fs::write(&gh, "#!/bin/sh\necho https://example.test/pr/67\n").unwrap();
+        make_executable(&gh);
+        let old_path = std::env::var_os("PATH");
+        let new_path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            old_path
+                .as_ref()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+        );
+        std::env::set_var("PATH", new_path);
+
+        let response = handle_request(
+            &config,
+            "POST /api/runs/run_pr_retry/pr-retry HTTP/1.1\r\n\r\n",
+        )
+        .unwrap();
+
+        if let Some(path) = old_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains(r#""pr_status":"created""#));
+        assert!(response.contains("https://example.test/pr/67"));
+        let updated = store.show_run("run_pr_retry").unwrap();
+        assert_eq!(updated.pr_status, "created");
+        assert_eq!(
+            updated.pr_url.as_deref(),
+            Some("https://example.test/pr/67")
+        );
     }
 
     #[test]
