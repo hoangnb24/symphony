@@ -130,6 +130,14 @@ creation fails, or validation fails, the task moves to `Needs Attention`.
 - Suggested next action.
 - Retry controls when retry is safe.
 
+The primary board/detail surface must not stop at a generic `Needs Attention`
+label. It should show a concise failure reason and a path to the evidence that
+explains the transition, such as `APP_SERVER_EVENTS.jsonl`, `SUMMARY.md`,
+`RESULT.json`, PR creation output, or validation output. A technical maintainer
+should be able to tell whether the issue is a Codex protocol/runtime problem,
+missing artifact, PR/review problem, validation failure, or manual follow-up
+without leaving the controller first.
+
 ## Review Surface
 
 The review screen should expose enough information for the user to make an
@@ -235,6 +243,7 @@ Implementation stories should include proof for:
 - Codex event streaming from `APP_SERVER_EVENTS.jsonl`.
 - `turn/completed` plus valid `RESULT.json` transition to `Review`.
 - Failed run transition to `Needs Attention`.
+- Needs Attention explanation, artifact links, and suggested next action.
 - PR merged plus sync transition to `Done`.
 - Browser UI flow through Playwright or equivalent.
 - Ready task deletion guardrails: visible only for Ready tasks, confirmation

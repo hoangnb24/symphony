@@ -35,6 +35,7 @@ Symphony records.
 17. `US-063` - Small completion alert when an active task finishes.
 18. `US-064` - Ready work story delete action.
 19. `US-065` - Unlimited Codex app-server task runtime.
+20. `US-066` - Needs Attention failure explanation.
 
 ## Exit Criteria
 
@@ -48,6 +49,8 @@ Symphony records.
   deleting durable Harness history.
 - Codex App Server tasks are not failed by a fixed wall-clock timeout while
   still surfacing real terminal failures and validation errors.
+- Needs Attention tasks show a concise failure reason, evidence artifacts, and
+  a suggested next action from the Web UI.
 - Dependency cycles are detected and shown as task breakdown problems.
 - Browser-level validation proves the board, task detail, event stream, review,
   and sync workflows.
