@@ -33,6 +33,7 @@ Symphony records.
 15. `US-061` - FrankenTUI app server log TUI.
 16. `US-062` - Confetti close effect for the task detail popup.
 17. `US-063` - Small completion alert when an active task finishes.
+18. `US-064` - Ready work story delete action.
 
 ## Exit Criteria
 
@@ -42,6 +43,8 @@ Symphony records.
 - A user can start exactly one ready task, watch live Codex App Server events,
   review completed artifacts and PR state, approve sync after merge, and see
   the task move to Done.
+- A user can delete unwanted Ready work from the active board without hard
+  deleting durable Harness history.
 - Dependency cycles are detected and shown as task breakdown problems.
 - Browser-level validation proves the board, task detail, event stream, review,
   and sync workflows.

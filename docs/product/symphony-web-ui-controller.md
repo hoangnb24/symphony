@@ -25,6 +25,8 @@ of truth.
   first, while keeping raw artifacts available for technical review.
 - Keep all tasks visible, but block unsafe actions when dependencies or active
   run rules prevent work from starting.
+- Let users remove unwanted unstarted work from the active board without
+  destroying durable Harness history.
 - Make hierarchy explicit so users can understand how feature intake breaks a
   larger request into executable work.
 - Keep the MVP local-only and unauthenticated.
@@ -94,6 +96,22 @@ The primary board states are:
 11. After the PR is merged, the user approves sync from the UI.
 12. UI runs Symphony sync.
 13. The task moves to `Done`.
+
+## Ready Task Removal
+
+The task detail popup may show a delete action only for tasks in `Ready` state.
+This action removes unwanted unstarted work from the active board by retiring
+the Harness story. It must not hard-delete the story row, run artifacts,
+changesets, dependencies, hierarchy records, or validation history.
+
+Delete must be explicit and guarded:
+
+- The UI asks for confirmation before retiring the task.
+- The backend re-checks that the task is still `Ready` before applying the
+  transition.
+- Tasks in `Blocked`, `In Progress`, `Review`, `Needs Attention`, or `Done`
+  cannot be deleted from the Web UI.
+- Retired tasks are not runnable and should not appear as active Ready work.
 
 ## Failure Workflow
 
@@ -198,6 +216,8 @@ build output and the current `harness-symphony` backend binary.
   `APP_SERVER_EVENTS.jsonl` through the local Web API.
 - The primary UI should summarize Codex events into readable chat/progress
   entries; raw `APP_SERVER_EVENTS.jsonl` remains available for debugging.
+- Ready task deletion is a lifecycle transition to Harness story status
+  `retired`, not a physical delete.
 
 ## Validation Expectations
 
@@ -212,3 +232,6 @@ Implementation stories should include proof for:
 - Failed run transition to `Needs Attention`.
 - PR merged plus sync transition to `Done`.
 - Browser UI flow through Playwright or equivalent.
+- Ready task deletion guardrails: visible only for Ready tasks, confirmation
+  required, backend refuses non-Ready tasks, and retired tasks disappear from
+  active Ready work.
