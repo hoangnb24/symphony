@@ -97,6 +97,67 @@ test("task detail close keeps working with reduced motion confetti suppressed", 
   await expect(page.getByTestId("task-close-confetti-host")).toHaveCount(0);
 });
 
+test("ready task delete action confirms, retires, and refreshes the board", async ({ page }) => {
+  let retired = false;
+  page.on("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Retire US-064 Ready Work Story Delete Action");
+    await dialog.accept();
+  });
+  await page.route("**/api/board", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: retired ? [] : [boardItem("US-064", "Ready Work Story Delete Action", "Ready")]
+      })
+    });
+  });
+  await page.route("**/api/tasks/US-064/retire", async (route) => {
+    expect(route.request().method()).toBe("POST");
+    retired = true;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ story_id: "US-064", status: "retired" })
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /US-064/ }).click();
+  const detail = page.getByRole("dialog", { name: "Selected work detail" });
+
+  await expect(detail.getByRole("button", { name: "Delete work story" })).toBeVisible();
+  await detail.getByRole("button", { name: "Delete work story" }).click();
+
+  await expect.poll(async () => retired).toBe(true);
+  await expect(detail).toBeHidden();
+  await expect(page.getByRole("button", { name: /US-064/ })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Ready column" }).getByText("No tasks")).toBeVisible();
+});
+
+test("delete action is hidden for non-ready tasks", async ({ page }) => {
+  await page.route("**/api/board", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          boardItem("US-064", "Blocked Delete Guard", "Blocked"),
+          boardItem("US-065", "Done Delete Guard", "Done")
+        ]
+      })
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /US-064/ }).click();
+
+  let detail = page.getByRole("dialog", { name: "Selected work detail" });
+  await expect(detail.getByRole("button", { name: "Delete work story" })).toHaveCount(0);
+  await detail.getByRole("button", { name: "Close selected work detail" }).click();
+  await page.getByRole("button", { name: /US-065/ }).click();
+  detail = page.getByRole("dialog", { name: "Selected work detail" });
+  await expect(detail.getByRole("button", { name: "Delete work story" })).toHaveCount(0);
+});
+
 test("sidebar renders dependency graph edges and selects tasks", async ({ page }) => {
   await page.route("**/api/board", async (route) => {
     await route.fulfill({

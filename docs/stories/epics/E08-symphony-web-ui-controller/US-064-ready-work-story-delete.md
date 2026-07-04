@@ -2,7 +2,7 @@
 
 ## Status
 
-planned
+implemented
 
 ## Lane
 
@@ -68,4 +68,13 @@ means a reversible lifecycle retirement, not physical durable-state deletion.
 
 ## Evidence
 
-Add commands, reports, screenshots, or links after validation exists.
+- `cargo fmt --check`
+- `cargo test -p harness-symphony retire -- --nocapture`
+- `cargo test -p harness-symphony board_omits_retired_stories_from_active_work -- --nocapture`
+- `cargo test -p harness-symphony web -- --nocapture`
+- `npm --prefix crates/harness-symphony/web-ui run build`
+- `npm --prefix crates/harness-symphony/web-ui run e2e`
+- `cargo test --workspace`
+- `cargo clippy --workspace -- -D warnings`
+- `npm --prefix crates/harness-symphony/web-ui run desktop:smoke`
+- `git diff --check`

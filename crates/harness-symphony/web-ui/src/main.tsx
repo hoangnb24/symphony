@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Search,
   ShieldAlert,
+  Trash2,
   X
 } from "lucide-react";
 import { Badge } from "./components/ui/badge";
@@ -155,6 +156,7 @@ function App() {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [startingId, setStartingId] = React.useState<string | null>(null);
+  const [deletingId, setDeletingId] = React.useState<string | null>(null);
   const [recoveringId, setRecoveringId] = React.useState<string | null>(null);
   const [syncingRunId, setSyncingRunId] = React.useState<string | null>(null);
   const [markingMergedRunId, setMarkingMergedRunId] = React.useState<string | null>(null);
@@ -248,6 +250,32 @@ function App() {
         setError(cause instanceof Error ? cause.message : "Start failed");
       } finally {
         setStartingId(null);
+      }
+    },
+    [loadBoard]
+  );
+
+  const retireTask = React.useCallback(
+    async (item: BoardItem) => {
+      if (!window.confirm(`Retire ${item.id} ${item.title}? This removes it from active Ready work without deleting history.`)) {
+        return;
+      }
+      setDeletingId(item.id);
+      setError(null);
+      try {
+        const response = await fetch(`/api/tasks/${encodeURIComponent(item.id)}/retire`, {
+          method: "POST"
+        });
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(body?.error ?? `Delete failed (${response.status})`);
+        }
+        setSelectedId(null);
+        await loadBoard();
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Delete failed");
+      } finally {
+        setDeletingId(null);
       }
     },
     [loadBoard]
@@ -412,12 +440,14 @@ function App() {
               <TaskDetail
                 item={selected}
                 startingId={startingId}
+                deletingId={deletingId}
                 recoveringId={recoveringId}
                 syncingRunId={syncingRunId}
                 markingMergedRunId={markingMergedRunId}
                 retryingPrRunId={retryingPrRunId}
                 onClose={closeSelectedTask}
                 onStart={startTask}
+                onRetire={retireTask}
                 onRecover={recoverTask}
                 onSync={syncRun}
                 onMarkPrMerged={markPrMerged}
@@ -816,12 +846,14 @@ function ConfettiBurstHost({
 function TaskDetail({
   item,
   startingId,
+  deletingId,
   recoveringId,
   syncingRunId,
   markingMergedRunId,
   retryingPrRunId,
   onClose,
   onStart,
+  onRetire,
   onRecover,
   onSync,
   onMarkPrMerged,
@@ -829,12 +861,14 @@ function TaskDetail({
 }: {
   item: BoardItem;
   startingId: string | null;
+  deletingId: string | null;
   recoveringId: string | null;
   syncingRunId: string | null;
   markingMergedRunId: string | null;
   retryingPrRunId: string | null;
   onClose: (origin?: HTMLElement) => void;
   onStart: (storyId: string) => Promise<void>;
+  onRetire: (item: BoardItem) => Promise<void>;
   onRecover: (storyId: string, action: RecoveryAction) => Promise<void>;
   onSync: (runId: string) => Promise<void>;
   onMarkPrMerged: (runId: string) => Promise<PrMergedResponse>;
@@ -917,6 +951,7 @@ function TaskDetail({
 
   const isReady = item.board_state === "Ready";
   const isStarting = startingId === item.id;
+  const isDeleting = deletingId === item.id;
   const executionRecovery = item.recovery_action?.kind === "execution_retry" ? item.recovery_action : null;
   const isRecovering = recoveringId === item.id;
   const needsAttention = item.board_state === "Needs Attention";
@@ -1013,6 +1048,17 @@ function TaskDetail({
             <Clock3 data-icon="inline-start" />
             Open artifacts
           </Button>
+          {isReady ? (
+            <Button
+              variant="outline"
+              disabled={isDeleting}
+              title="Retire this Ready story"
+              onClick={() => void onRetire(item)}
+            >
+              {isDeleting ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Trash2 data-icon="inline-start" />}
+              Delete work story
+            </Button>
+          ) : null}
         </div>
       </div>
 
