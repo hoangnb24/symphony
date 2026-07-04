@@ -34,6 +34,7 @@ Symphony records.
 16. `US-062` - Confetti close effect for the task detail popup.
 17. `US-063` - Small completion alert when an active task finishes.
 18. `US-064` - Ready work story delete action.
+19. `US-065` - Unlimited Codex app-server task runtime.
 
 ## Exit Criteria
 
@@ -45,6 +46,8 @@ Symphony records.
   the task move to Done.
 - A user can delete unwanted Ready work from the active board without hard
   deleting durable Harness history.
+- Codex App Server tasks are not failed by a fixed wall-clock timeout while
+  still surfacing real terminal failures and validation errors.
 - Dependency cycles are detected and shown as task breakdown problems.
 - Browser-level validation proves the board, task detail, event stream, review,
   and sync workflows.

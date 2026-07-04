@@ -88,14 +88,18 @@ The primary board states are:
 5. The task moves to `In Progress`.
 6. Entering `In Progress` starts execution like `harness-symphony run`.
 7. UI shows live Codex App Server events for the active run.
-8. When Codex emits `turn/completed` with completed status and required
+8. Codex App Server task execution is not capped by a fixed wall-clock timeout;
+   it continues until Codex reports a terminal turn, the app-server process
+   exits, an explicit cancellation path is added, a protocol stall guard fires,
+   or required result validation fails.
+9. When Codex emits `turn/completed` with completed status and required
    artifacts validate, Symphony creates a PR.
-9. The task moves to `Review`.
-10. User reviews summary, result, changeset, validation evidence, PR status, and
+10. The task moves to `Review`.
+11. User reviews summary, result, changeset, validation evidence, PR status, and
    logs.
-11. After the PR is merged, the user approves sync from the UI.
-12. UI runs Symphony sync.
-13. The task moves to `Done`.
+12. After the PR is merged, the user approves sync from the UI.
+13. UI runs Symphony sync.
+14. The task moves to `Done`.
 
 ## Ready Task Removal
 
@@ -227,6 +231,7 @@ Implementation stories should include proof for:
 - Dependency cycle detection.
 - Single-active-task enforcement.
 - `Ready` to `In Progress` transition.
+- Codex App Server execution without a fixed wall-clock timeout.
 - Codex event streaming from `APP_SERVER_EVENTS.jsonl`.
 - `turn/completed` plus valid `RESULT.json` transition to `Review`.
 - Failed run transition to `Needs Attention`.
