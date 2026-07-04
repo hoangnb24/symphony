@@ -346,7 +346,13 @@ fn print_config(config: &ResolvedConfig) {
     println!("single_active_run: {}", config.single_active_run);
     println!("agent_adapter: {}", config.agent_adapter);
     println!("agent_command: {}", config.agent_command.join(" "));
-    println!("agent_timeout_minutes: {}", config.agent_timeout_minutes);
+    println!(
+        "custom_agent_timeout_minutes: {}",
+        config.agent_timeout_minutes
+    );
+    if config.agent_adapter == "codex" {
+        println!("codex_app_server_runtime: uncapped");
+    }
     println!("pull_request_create: {}", config.pull_request_create);
     println!("pull_request_provider: {}", config.pull_request_provider);
     println!(

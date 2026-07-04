@@ -61,7 +61,7 @@ pub fn agent_adapter_status(config: &ResolvedConfig) -> Result<String, AgentErro
             }
         }
         "codex" => Ok(format!(
-            "codex app-server command: {}",
+            "codex app-server command: {}; runtime: uncapped",
             resolved_agent_command(config).join(" ")
         )),
         other => Err(AgentError::UnsupportedAdapter(other.to_owned())),
@@ -137,7 +137,6 @@ fn run_codex_agent(config: &ResolvedConfig, prepared: &PreparedRun) -> Result<()
         }),
     )?;
 
-    let deadline = Instant::now() + Duration::from_secs(config.agent_timeout_minutes as u64 * 60);
     let event_log_path = prepared
         .contract_path
         .parent()
@@ -152,15 +151,6 @@ fn run_codex_agent(config: &ResolvedConfig, prepared: &PreparedRun) -> Result<()
     let mut next_request_id: i64 = 3;
     let mut pending_state_query: Option<i64> = None;
     loop {
-        if Instant::now() >= deadline {
-            terminate_child(&mut child);
-            return Err(AgentError::Codex(format!(
-                "timed out after {} minute(s). Last app-server method: {last_observed_method}; events: {event_count}; see {}",
-                config.agent_timeout_minutes,
-                event_log_path.display()
-            )));
-        }
-
         let line = match line_rx.recv_timeout(Duration::from_millis(250)) {
             Ok(line) => line,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -578,6 +568,78 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
         prepared.contract_path = worktree.join(".harness/runs/run_1/RUN_CONTRACT.json");
 
         run_codex_agent(&config, &prepared).unwrap();
+    }
+
+    #[test]
+    fn codex_adapter_does_not_use_agent_timeout_as_wall_clock_deadline() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let worktree = temp_dir.path().join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let fake_server = temp_dir.path().join("fake-codex-app-server");
+        fs::write(
+            &fake_server,
+            r#"#!/usr/bin/env sh
+read initialize
+printf '%s\n' '{"id":0,"result":{"userAgent":"fake","codexHome":"/tmp","platformFamily":"unix","platformOs":"macos"}}'
+read initialized
+read thread_start
+printf '%s\n' '{"id":1,"result":{"thread":{"id":"thr_1"}}}'
+read turn_start
+printf '%s\n' '{"id":2,"result":{"turn":{"id":"turn_1","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null}}}'
+printf '%s\n' '{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}}}'
+read state_query_one
+printf '%s\n' '{"id":3,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1,"completedAt":null,"durationMs":null}],"nextCursor":null,"backwardsCursor":null}}'
+read state_query_two
+printf '%s\n' '{"id":4,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"notLoaded","status":"completed","error":null,"startedAt":1,"completedAt":2,"durationMs":1000}],"nextCursor":null,"backwardsCursor":null}}'
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_server).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_server, permissions).unwrap();
+
+        let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
+        config.agent_timeout_minutes = 0;
+        let mut prepared = prepared();
+        prepared.worktree = worktree.clone();
+        prepared.harness_db_path = worktree.join("harness.db");
+        prepared.contract_path = worktree.join(".harness/runs/run_1/RUN_CONTRACT.json");
+
+        run_codex_agent(&config, &prepared).unwrap();
+    }
+
+    #[test]
+    fn codex_adapter_reports_failed_terminal_turn() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let worktree = temp_dir.path().join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let fake_server = temp_dir.path().join("fake-codex-app-server");
+        fs::write(
+            &fake_server,
+            r#"#!/usr/bin/env sh
+read initialize
+printf '%s\n' '{"id":0,"result":{"userAgent":"fake","codexHome":"/tmp","platformFamily":"unix","platformOs":"macos"}}'
+read initialized
+read thread_start
+printf '%s\n' '{"id":1,"result":{"thread":{"id":"thr_1"}}}'
+read turn_start
+printf '%s\n' '{"id":2,"result":{}}'
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","items":[],"itemsView":{"type":"complete"},"status":"failed","error":{"message":"boom"},"startedAt":1,"completedAt":2,"durationMs":1000}}}'
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_server).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_server, permissions).unwrap();
+
+        let config = config("codex", vec![fake_server.to_str().unwrap()]);
+        let mut prepared = prepared();
+        prepared.worktree = worktree.clone();
+        prepared.harness_db_path = worktree.join("harness.db");
+        prepared.contract_path = worktree.join(".harness/runs/run_1/RUN_CONTRACT.json");
+
+        let error = run_codex_agent(&config, &prepared).unwrap_err();
+        assert!(error.to_string().contains("turn status was failed: boom"));
     }
 
     #[test]

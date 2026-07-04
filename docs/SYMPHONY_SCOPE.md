@@ -697,6 +697,7 @@ symphony:
 
 agent:
   adapter: codex
+  # Applies to custom one-shot adapters; Codex app-server runs are lifecycle-based.
   timeout_minutes: 10
 
 pull_request:
