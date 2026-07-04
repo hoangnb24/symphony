@@ -10,6 +10,8 @@ use crate::state::{RunRecord, RunStateStore, StateError};
 pub enum WorkError {
     #[error("harness database not found at {0}. Run: scripts/bin/harness-cli init")]
     MissingDatabase(String),
+    #[error("story {0} not found")]
+    StoryNotFound(String),
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("{0}")]
@@ -145,6 +147,10 @@ pub fn list_board(harness_db: &Path, state_db: &Path) -> Result<Vec<BoardItem>, 
     }
     let connection = Connection::open(harness_db)?;
     let stories = load_story_rows(&connection)?;
+    let stories = stories
+        .into_iter()
+        .filter(|story| story.status != "retired")
+        .collect::<Vec<_>>();
     let story_ids = stories
         .iter()
         .map(|story| story.id.clone())
@@ -209,6 +215,21 @@ pub fn list_board(harness_db: &Path, state_db: &Path) -> Result<Vec<BoardItem>, 
         .collect::<Vec<_>>();
     items.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(items)
+}
+
+pub fn retire_story(harness_db: &Path, story_id: &str) -> Result<(), WorkError> {
+    if !harness_db.exists() {
+        return Err(WorkError::MissingDatabase(harness_db.display().to_string()));
+    }
+    let connection = Connection::open(harness_db)?;
+    connection.execute(
+        "UPDATE story SET status='retired' WHERE id=?1;",
+        params![story_id],
+    )?;
+    if connection.changes() == 0 {
+        return Err(WorkError::StoryNotFound(story_id.to_owned()));
+    }
+    Ok(())
 }
 
 fn classify(id: String, status: String, lane: String, verify_command: Option<String>) -> WorkItem {
@@ -760,6 +781,20 @@ mod tests {
 
         assert_eq!(items[0].board_state, BoardState::Ready);
         assert_eq!(items[0].reason, "ready");
+    }
+
+    #[test]
+    fn board_omits_retired_stories_from_active_work() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = create_harness_db(&temp_dir, false);
+        let state_db = temp_dir.path().join(".symphony/state.db");
+        insert_story(&db_path, "US-READY", "planned");
+        insert_story(&db_path, "US-RETIRED", "retired");
+
+        let items = list_board(&db_path, &state_db).unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "US-READY");
     }
 
     #[test]

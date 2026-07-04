@@ -13,7 +13,7 @@ use crate::pr::{create_pr, PrError};
 use crate::run::{execute_prepared_run, prepare_run, PreparedRun, RunError};
 use crate::state::{RunStateStore, StateError};
 use crate::sync::{sync_changeset, SyncChange, SyncError};
-use crate::work::{list_board, BoardItem, BoardState, WorkError};
+use crate::work::{list_board, retire_story, BoardItem, BoardState, WorkError};
 
 const WEB_DIST_DIR_ENV: &str = "HARNESS_SYMPHONY_WEB_DIST_DIR";
 
@@ -128,6 +128,12 @@ struct PrRetryResponse {
     run_id: String,
     pr_status: String,
     pr_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RetireTaskResponse {
+    story_id: String,
+    status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -246,6 +252,10 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse
             let story_id = recover_path_story_id(path).unwrap_or_default();
             recover_run_response(config, &story_id)
         }
+        (Some("POST"), Some(path)) if retire_path_story_id(path).is_some() => {
+            let story_id = retire_path_story_id(path).unwrap_or_default();
+            retire_task_response(config, &story_id)
+        }
         (Some("GET"), Some(path)) if events_path_run_id(path).is_some() => {
             let run_id = events_path_run_id(path).unwrap_or_default();
             events_response(config, &run_id)
@@ -276,6 +286,7 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse
         (Some(_), Some(path))
             if start_path_story_id(path).is_some()
                 || recover_path_story_id(path).is_some()
+                || retire_path_story_id(path).is_some()
                 || events_path_run_id(path).is_some()
                 || review_path_run_id(path).is_some()
                 || sync_path_run_id(path).is_some()
@@ -296,6 +307,39 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse
             },
         ),
     }
+}
+
+fn retire_task_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpResponse, WebError> {
+    let item = match list_board(&config.harness_db, &config.state_db)?
+        .into_iter()
+        .find(|item| item.id == story_id)
+    {
+        Some(item) => item,
+        None => {
+            return json_response(
+                404,
+                &ErrorResponse {
+                    error: "story not found".to_owned(),
+                },
+            );
+        }
+    };
+    if item.board_state != BoardState::Ready {
+        return json_response(
+            409,
+            &ErrorResponse {
+                error: "only Ready stories can be retired".to_owned(),
+            },
+        );
+    }
+    retire_story(&config.harness_db, story_id)?;
+    json_response(
+        200,
+        &RetireTaskResponse {
+            story_id: story_id.to_owned(),
+            status: "retired".to_owned(),
+        },
+    )
 }
 
 fn recover_run_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpResponse, WebError> {
@@ -1157,6 +1201,12 @@ fn recover_path_story_id(path: &str) -> Option<String> {
     safe_identifier(story_id).then(|| story_id.to_owned())
 }
 
+fn retire_path_story_id(path: &str) -> Option<String> {
+    let path = path.trim_end_matches('/');
+    let story_id = path.strip_prefix("/api/tasks/")?.strip_suffix("/retire")?;
+    safe_identifier(story_id).then(|| story_id.to_owned())
+}
+
 fn events_path_run_id(path: &str) -> Option<String> {
     let path = path.trim_end_matches('/');
     let run_id = path.strip_prefix("/api/runs/")?.strip_suffix("/events")?;
@@ -1378,6 +1428,15 @@ mod tests {
     }
 
     fn seed_story(db_path: &std::path::Path) {
+        seed_story_with_status(db_path, "US-WEB", "Web backend", "planned");
+    }
+
+    fn seed_story_with_status(
+        db_path: &std::path::Path,
+        story_id: &str,
+        title: &str,
+        status: &str,
+    ) {
         let connection = Connection::open(db_path).unwrap();
         connection
             .execute_batch(
@@ -1393,8 +1452,8 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO story (id, title, status, risk_lane, verify_command)
-                 VALUES (?1, ?2, 'planned', 'normal', 'cargo test');",
-                params!["US-WEB", "Web backend"],
+                 VALUES (?1, ?2, ?3, 'normal', 'cargo test');",
+                params![story_id, title, status],
             )
             .unwrap();
     }
@@ -1554,6 +1613,54 @@ mod tests {
             Some("US-050".to_owned())
         );
         assert_eq!(start_path_story_id("/api/tasks/../start"), None);
+        assert_eq!(
+            retire_path_story_id("/api/tasks/US-064/retire"),
+            Some("US-064".to_owned())
+        );
+        assert_eq!(retire_path_story_id("/api/tasks/../retire"), None);
+    }
+
+    #[test]
+    fn retire_ready_task_updates_story_status_and_removes_it_from_board() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        seed_story_with_status(
+            &config.harness_db,
+            "US-064",
+            "Ready Work Story Delete Action",
+            "planned",
+        );
+
+        let response =
+            handle_request(&config, "POST /api/tasks/US-064/retire HTTP/1.1\r\n\r\n").unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains(r#""story_id":"US-064""#));
+        assert!(response.contains(r#""status":"retired""#));
+        let connection = Connection::open(&config.harness_db).unwrap();
+        let status = connection
+            .query_row("SELECT status FROM story WHERE id='US-064';", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
+        assert_eq!(status, "retired");
+
+        let board = handle_request(&config, "GET /api/board HTTP/1.1\r\n\r\n").unwrap();
+        assert!(board.starts_with("HTTP/1.1 200 OK"));
+        assert!(!board.contains("US-064"));
+    }
+
+    #[test]
+    fn retire_task_refuses_non_ready_story_state() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        seed_story_with_status(&config.harness_db, "US-DONE", "Done Story", "implemented");
+
+        let response =
+            handle_request(&config, "POST /api/tasks/US-DONE/retire HTTP/1.1\r\n\r\n").unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 409 Conflict"));
+        assert!(response.contains("only Ready stories can be retired"));
     }
 
     #[test]
