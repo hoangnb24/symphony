@@ -17,7 +17,6 @@ of increasing the whole page height.
 ## Relevant Product Docs
 
 - `docs/product/symphony-web-ui-controller.md`
-- `docs/design/symphony-web-ui-controller/README.md`
 
 ## Acceptance Criteria
 

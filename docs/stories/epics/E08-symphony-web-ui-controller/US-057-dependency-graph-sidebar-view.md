@@ -17,7 +17,6 @@ edges without leaving the Kanban-first controller.
 ## Relevant Product Docs
 
 - `docs/product/symphony-web-ui-controller.md`
-- `docs/design/symphony-web-ui-controller/README.md`
 
 ## Acceptance Criteria
 

@@ -10,20 +10,19 @@ normal
 
 ## Product Contract
 
-The Symphony Web UI should adopt the reference controller design in
-`docs/design/symphony-web-ui-controller/` while preserving the existing local
-API contracts for board, run event, review, PR merged, and sync state.
+The Symphony Web UI should preserve the accepted Kanban-first controller shape
+while keeping the existing local API contracts for board, run event, review, PR
+merged, and sync state.
 
 ## Relevant Product Docs
 
 - `docs/product/symphony-web-ui-controller.md`
-- `docs/design/symphony-web-ui-controller/README.md`
 
 ## Acceptance Criteria
 
 - The browser surface uses a Notion-style Symphony sidebar, summary strip,
   six-state Kanban board, selected-task detail rail, and dependency/log review
-  sections matching the reference template.
+  sections matching the accepted product contract.
 - The UI continues to read board data from `GET /api/board`.
 - Ready tasks can still call `POST /api/tasks/<story-id>/start`.
 - Run logs, review evidence, PR merged, and approve sync controls still use the
@@ -68,4 +67,5 @@ No harness process change expected.
 - Playwright viewport screenshots were captured for desktop, selected detail,
   and mobile controller states.
 - Visual inspection compared the selected-detail and mobile screenshots against
-  `docs/design/symphony-web-ui-controller/mqum833g-drawing-2026-06-26T07-34-24-936Z.png`.
+  the accepted Kanban-first controller direction before the standalone design
+  reference artifact was retired.
