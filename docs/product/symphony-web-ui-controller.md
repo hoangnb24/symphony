@@ -138,6 +138,19 @@ should be able to tell whether the issue is a Codex protocol/runtime problem,
 missing artifact, PR/review problem, validation failure, or manual follow-up
 without leaving the controller first.
 
+Recovery from `Needs Attention` must be explicit and guarded:
+
+- Retryable execution failures can start a new run for the same story after the
+  user confirms the retry.
+- PR creation failures retry PR creation for the completed run instead of
+  starting the agent again.
+- Recovery never rewrites a failed run into a successful run; old run evidence
+  remains available.
+- The backend decides whether recovery is allowed from story status, latest run
+  status, PR state, sync state, and the active-run lock.
+- Recovery is refused when another run is active, the story is no longer
+  runnable, or the task is already in `Review` or `Done`.
+
 ## Review Surface
 
 The review screen should expose enough information for the user to make an
@@ -244,6 +257,9 @@ Implementation stories should include proof for:
 - `turn/completed` plus valid `RESULT.json` transition to `Review`.
 - Failed run transition to `Needs Attention`.
 - Needs Attention explanation, artifact links, and suggested next action.
+- Needs Attention recovery controls: retryable execution failure starts a new
+  run, PR failure retries PR creation, and non-recoverable states are refused
+  with clear errors.
 - PR merged plus sync transition to `Done`.
 - Browser UI flow through Playwright or equivalent.
 - Ready task deletion guardrails: visible only for Ready tasks, confirmation

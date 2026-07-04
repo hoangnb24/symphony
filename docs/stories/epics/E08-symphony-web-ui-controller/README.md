@@ -36,6 +36,7 @@ Symphony records.
 18. `US-064` - Ready work story delete action.
 19. `US-065` - Unlimited Codex app-server task runtime.
 20. `US-066` - Needs Attention failure explanation.
+21. `US-067` - Needs Attention recovery action.
 
 ## Exit Criteria
 
@@ -51,6 +52,8 @@ Symphony records.
   still surfacing real terminal failures and validation errors.
 - Needs Attention tasks show a concise failure reason, evidence artifacts, and
   a suggested next action from the Web UI.
+- Needs Attention tasks offer guarded retry or PR-retry recovery controls when
+  the backend classifies the latest failure as recoverable.
 - Dependency cycles are detected and shown as task breakdown problems.
 - Browser-level validation proves the board, task detail, event stream, review,
   and sync workflows.
