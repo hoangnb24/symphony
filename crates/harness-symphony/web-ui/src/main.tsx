@@ -738,32 +738,33 @@ function TaskCard({
     <button
       onClick={() => onSelect(item.id)}
       className={cn(
-        "block w-full rounded-md border border-border bg-background p-3 text-left shadow-sm transition hover:border-primary hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "block w-full min-w-0 overflow-hidden rounded-md border border-border bg-background p-3 text-left shadow-sm transition hover:border-primary hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         selected && "border-primary shadow-md",
         blocked && "bg-warning/10",
         attention && "bg-destructive/10",
         done && "opacity-80"
       )}
+      data-testid="task-card"
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-xs font-bold text-muted-foreground">{item.id}</span>
-        <Badge tone={item.verify === "configured" ? stateTone[item.board_state] : "neutral"}>
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <span className="min-w-0 truncate font-mono text-xs font-bold text-muted-foreground">{item.id}</span>
+        <Badge className="max-w-[58%] shrink-0 truncate" tone={item.verify === "configured" ? stateTone[item.board_state] : "neutral"}>
           {item.board_state === "In Progress" ? "active" : item.verify}
         </Badge>
       </div>
-      <h3 className="mt-2 line-clamp-3 text-sm font-bold leading-5">{item.title}</h3>
-      <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">{item.reason}</p>
+      <h3 className="bounded-text mt-2 line-clamp-3 text-sm font-bold leading-5">{item.title}</h3>
+      <p className="bounded-text mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">{item.reason}</p>
       {item.failure_summary ? (
-        <div className="mt-2 flex items-center gap-2 rounded-sm border border-destructive/20 bg-destructive/10 px-2 py-1 text-xs font-semibold text-destructive">
+        <div className="mt-2 flex min-w-0 items-start gap-2 overflow-hidden rounded-sm border border-destructive/20 bg-destructive/10 px-2 py-1 text-xs font-semibold text-destructive">
           <AlertTriangle className="size-3 shrink-0" />
-          <span className="truncate">{item.failure_summary.category}</span>
+          <span className="bounded-text line-clamp-2 min-w-0">{item.failure_summary.category}</span>
         </div>
       ) : null}
-      <div className="mt-3 flex flex-wrap gap-1 border-t border-border/70 pt-2">
-        <span className="rounded-full border border-border bg-background px-2 py-0.5 text-xs font-semibold text-muted-foreground">
+      <div className="mt-3 flex min-w-0 flex-wrap gap-1 border-t border-border/70 pt-2">
+        <span className="max-w-full truncate rounded-full border border-border bg-background px-2 py-0.5 text-xs font-semibold text-muted-foreground">
           {item.board_state === "Ready" ? "Start" : item.board_state === "Blocked" ? "Start disabled" : item.lane}
         </span>
-        <span className="rounded-full border border-border bg-background px-2 py-0.5 text-xs font-semibold text-muted-foreground">
+        <span className="max-w-full truncate rounded-full border border-border bg-background px-2 py-0.5 text-xs font-semibold text-muted-foreground">
           {item.blockers.length > 0 ? `${item.blockers.length} blockers` : item.run_id ?? "No run"}
         </span>
       </div>

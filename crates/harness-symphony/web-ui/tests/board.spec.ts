@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 function boardItem(id: string, title: string, board_state: string) {
   return {
@@ -19,6 +19,20 @@ function boardItem(id: string, title: string, board_state: string) {
     failure_summary: null,
     recovery_action: null
   };
+}
+
+async function expectNoHorizontalOverflow(locator: Locator, label: string) {
+  const overflow = await locator.evaluate(
+    (element) => Math.ceil(element.scrollWidth) - Math.ceil(element.clientWidth)
+  );
+  expect(overflow, `${label} horizontal overflow`).toBeLessThanOrEqual(1);
+}
+
+async function expectPageNoHorizontalOverflow(page: Page) {
+  const overflow = await page.evaluate(
+    () => Math.ceil(document.documentElement.scrollWidth) - Math.ceil(window.innerWidth)
+  );
+  expect(overflow, "page horizontal overflow").toBeLessThanOrEqual(1);
 }
 
 test("board renders task columns and detail controls", async ({ page }) => {
@@ -233,6 +247,27 @@ test("sidebar renders dependency graph edges and selects tasks", async ({ page }
 });
 
 test("board columns stay bounded and scroll dense task lists internally", async ({ page }) => {
+  const longToken =
+    "BoundedWorkItemCardsNeedToContainThisUnbrokenRunIdentifierFailureCategoryLaneLabelAndBlockerMetadata1234567890";
+  const longReadyItem = {
+    ...boardItem(`US-068-${longToken}`, `Bounded summary ${longToken} ${longToken}`, "Ready"),
+    reason: `Ready because ${longToken} should stay inside the card summary instead of widening the board column.`
+  };
+  const longAttentionItem = {
+    ...boardItem("US-968", `Needs attention ${longToken}`, "Needs Attention"),
+    lane: `normal-${longToken}`,
+    run_id: `run_${longToken}`,
+    reason: `Failure reason ${longToken} remains a compact board summary.`,
+    failure_summary: {
+      category: `Category-${longToken}`,
+      reason: `Reason-${longToken}`,
+      latest_event: `Event-${longToken}`,
+      latest_error: `Error-${longToken}`,
+      run_id: `run_${longToken}`,
+      evidence_artifacts: [`.harness/runs/run_${longToken}/RESULT.json`],
+      next_action: `Inspect-${longToken}`
+    }
+  };
   const denseReadyItems = Array.from({ length: 22 }, (_, index) =>
     boardItem(`US-9${String(index).padStart(2, "0")}`, `Dense ready task ${index + 1}`, "Ready")
   );
@@ -243,11 +278,11 @@ test("board columns stay bounded and scroll dense task lists internally", async 
   await page.route("**/api/board", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ items: [...denseReadyItems, ...sparseItems] })
+      body: JSON.stringify({ items: [longReadyItem, ...denseReadyItems, longAttentionItem, ...sparseItems] })
     });
   });
 
-  await page.setViewportSize({ width: 1280, height: 820 });
+  await page.setViewportSize({ width: 1440, height: 820 });
   await page.goto("/");
 
   for (const state of ["Ready", "Blocked", "In Progress", "Review", "Needs Attention", "Done"]) {
@@ -255,7 +290,11 @@ test("board columns stay bounded and scroll dense task lists internally", async 
   }
 
   const readyColumn = page.getByRole("region", { name: "Ready column" });
+  const needsAttentionColumn = page.getByRole("region", { name: "Needs Attention column" });
   const readyTasks = page.locator('[aria-label="Ready tasks"]');
+  const board = page.locator("#board");
+  const longReadyCard = page.getByTestId("task-card").filter({ hasText: `US-068-${longToken}` });
+  const longAttentionCard = page.getByTestId("task-card").filter({ hasText: "US-968" });
   const pageScrollHeight = await page.evaluate(() => document.documentElement.scrollHeight);
   const viewportHeight = await page.evaluate(() => window.innerHeight);
   const readyMetrics = await readyTasks.evaluate((element) => ({
@@ -266,6 +305,12 @@ test("board columns stay bounded and scroll dense task lists internally", async 
 
   expect(readyMetrics.scrollHeight).toBeGreaterThan(readyMetrics.clientHeight);
   expect(pageScrollHeight).toBeLessThan(viewportHeight + 280);
+  await expectPageNoHorizontalOverflow(page);
+  await expectNoHorizontalOverflow(board, "desktop board");
+  await expectNoHorizontalOverflow(readyColumn, "desktop ready column");
+  await expectNoHorizontalOverflow(needsAttentionColumn, "desktop needs attention column");
+  await expectNoHorizontalOverflow(longReadyCard, "desktop long ready card");
+  await expectNoHorizontalOverflow(longAttentionCard, "desktop long needs attention card");
 
   await readyTasks.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
@@ -284,6 +329,12 @@ test("board columns stay bounded and scroll dense task lists internally", async 
     scrollHeight: element.scrollHeight
   }));
   expect(mobileReadyMetrics.scrollHeight).toBeGreaterThan(mobileReadyMetrics.clientHeight);
+  await expectPageNoHorizontalOverflow(page);
+  await expectNoHorizontalOverflow(board, "mobile board");
+  await expectNoHorizontalOverflow(readyColumn, "mobile ready column");
+  await expectNoHorizontalOverflow(needsAttentionColumn, "mobile needs attention column");
+  await expectNoHorizontalOverflow(longReadyCard, "mobile long ready card");
+  await expectNoHorizontalOverflow(longAttentionCard, "mobile long needs attention card");
   await readyColumn.getByRole("button", { name: /US-900/ }).click();
   await expect(page.getByRole("dialog", { name: "Selected work detail" })).toBeVisible();
 });
