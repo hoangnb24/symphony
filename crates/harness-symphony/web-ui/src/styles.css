@@ -46,6 +46,11 @@ body {
   overflow: hidden;
 }
 
+.bounded-text {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
 .task-close-confetti-host {
   position: fixed;
   inset: 0;

@@ -2,7 +2,7 @@
 
 ## Status
 
-planned
+implemented
 
 ## Lane
 
@@ -62,4 +62,10 @@ pattern that future Web UI stories can reuse for overflow-sensitive layouts.
 
 ## Evidence
 
-Add commands, reports, screenshots, or links after validation exists.
+- Implemented bounded board-card summaries for long IDs, titles, reasons,
+  failure categories, lane labels, and run IDs without changing board APIs or
+  state derivation.
+- `npm --prefix crates/harness-symphony/web-ui run build`
+- `npm --prefix crates/harness-symphony/web-ui run e2e`
+- `npm --prefix crates/harness-symphony/web-ui run desktop:smoke`
+- `git diff --check`
