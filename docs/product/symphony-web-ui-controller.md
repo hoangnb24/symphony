@@ -58,6 +58,12 @@ The board must not create horizontal scrolling inside a column or inside a
 card. Dense task lists may scroll vertically within a column. Full work-item
 content belongs in the task detail popup or review surfaces.
 
+Board cards must remain readable while they are bounded. Dense columns may use
+compact cards, but a card should still expose its story ID, status or verify
+badge, readable title summary, and key metadata. A column with many tasks must
+not compress cards into clipped strips where most of the summary content is
+hidden.
+
 ## Dependency Model
 
 Dependencies live in Harness because they are produced during feature intake.

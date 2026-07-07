@@ -39,6 +39,7 @@ Symphony records.
 21. `US-067` - Needs Attention recovery action.
 22. `US-068` - Bounded work item cards.
 23. `US-069` - Web UI design principles and validation.
+24. `US-070` - Readable Done column task cards.
 
 ## Exit Criteria
 
@@ -58,6 +59,8 @@ Symphony records.
   the backend classifies the latest failure as recoverable.
 - Work-item cards stay bounded inside board columns and put full content in the
   task detail popup.
+- Dense Done columns preserve readable compact card summaries instead of
+  collapsing implemented stories into clipped strips.
 - Future Web UI work follows an explicit lightweight controller design contract
   backed by build, Playwright, screenshot, and optional design-lint validation.
 - Dependency cycles are detected and shown as task breakdown problems.
