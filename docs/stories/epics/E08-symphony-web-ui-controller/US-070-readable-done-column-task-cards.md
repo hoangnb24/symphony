@@ -2,7 +2,7 @@
 
 ## Status
 
-planned
+implemented
 
 ## Lane
 
@@ -74,9 +74,13 @@ vertical readability.
 
 ## Evidence
 
-Planning evidence:
-
-- Live QA screenshot showed the Done column with 63 tasks and collapsed cards.
-- Generated image preview established the target visual direction: readable,
-  compact Done cards with story ID, verify badge, title summary, and metadata
-  rows.
+- Implemented the board task list as a flex-column scroller and gave task cards
+  an explicit compact minimum height so dense Done columns scroll instead of
+  compressing cards into clipped strips.
+- Added Playwright coverage for a 48-item Done column on desktop and mobile,
+  asserting readable card height, visible ID/status/title/metadata, internal
+  vertical scrolling, and no page/board/column/card horizontal overflow.
+- `npm --prefix crates/harness-symphony/web-ui run build`
+- `npm --prefix crates/harness-symphony/web-ui run e2e`
+- `npm --prefix crates/harness-symphony/web-ui run desktop:smoke`
+- `git diff --check`

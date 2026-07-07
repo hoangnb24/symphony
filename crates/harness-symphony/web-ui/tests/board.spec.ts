@@ -35,6 +35,11 @@ async function expectPageNoHorizontalOverflow(page: Page) {
   expect(overflow, "page horizontal overflow").toBeLessThanOrEqual(1);
 }
 
+async function expectReadableTaskCard(locator: Locator, label: string) {
+  const box = await locator.boundingBox();
+  expect(box?.height ?? 0, `${label} readable card height`).toBeGreaterThanOrEqual(124);
+}
+
 test("board renders task columns and detail controls", async ({ page }) => {
   await page.goto("/");
 
@@ -416,6 +421,80 @@ test("board columns stay bounded and scroll dense task lists internally", async 
   await expectNoHorizontalOverflow(longAttentionCard, "mobile long needs attention card");
   await readyColumn.getByRole("button", { name: /US-900/ }).click();
   await expect(page.getByRole("dialog", { name: "Selected work detail" })).toBeVisible();
+});
+
+test("done column keeps dense completed task cards readable while scrolling internally", async ({ page }) => {
+  const denseDoneItems = Array.from({ length: 48 }, (_, index) => {
+    const item = boardItem(
+      `US-070-D${String(index).padStart(2, "0")}`,
+      `Readable Done card summary ${index + 1}`,
+      "Done"
+    );
+    item.reason = `Completed work item ${index + 1} remains readable in a dense Done column.`;
+    item.run_id = index % 2 === 0 ? `run_done_${String(index).padStart(2, "0")}` : null;
+    return item;
+  });
+
+  await page.route("**/api/board", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ items: [boardItem("US-070-R", "Ready control", "Ready"), ...denseDoneItems] })
+    });
+  });
+
+  await page.setViewportSize({ width: 1440, height: 820 });
+  await page.goto("/");
+
+  const board = page.locator("#board");
+  const doneColumn = page.getByRole("region", { name: "Done column" });
+  const doneTasks = page.locator('[aria-label="Done tasks"]');
+  const firstDoneCard = doneColumn.getByTestId("task-card").filter({ hasText: "US-070-D00" });
+  const secondDoneCard = doneColumn.getByTestId("task-card").filter({ hasText: "US-070-D01" });
+
+  await expect(firstDoneCard).toBeVisible();
+  await expect(firstDoneCard).toContainText("configured");
+  await expect(firstDoneCard).toContainText("Readable Done card summary 1");
+  await expect(firstDoneCard).toContainText("normal");
+  await expect(firstDoneCard).toContainText("run_done_00");
+  await expect(secondDoneCard).toContainText("No run");
+  await expectReadableTaskCard(firstDoneCard, "desktop first Done card");
+  await expectReadableTaskCard(secondDoneCard, "desktop second Done card");
+
+  const doneMetrics = await doneTasks.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    scrollTop: element.scrollTop
+  }));
+  expect(doneMetrics.scrollHeight).toBeGreaterThan(doneMetrics.clientHeight);
+  await expectPageNoHorizontalOverflow(page);
+  await expectNoHorizontalOverflow(board, "desktop board with dense Done cards");
+  await expectNoHorizontalOverflow(doneColumn, "desktop Done column");
+  await expectNoHorizontalOverflow(firstDoneCard, "desktop first Done card");
+
+  await doneTasks.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(doneColumn.getByRole("heading", { name: "Done", exact: true })).toBeVisible();
+  await expect(doneColumn.getByRole("button", { name: /US-070-D47/ })).toBeVisible();
+  await expect
+    .poll(async () => doneTasks.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(doneMetrics.scrollTop);
+
+  await page.setViewportSize({ width: 390, height: 760 });
+  await doneTasks.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect(firstDoneCard).toBeVisible();
+  await expectReadableTaskCard(firstDoneCard, "mobile first Done card");
+  const mobileDoneMetrics = await doneTasks.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight
+  }));
+  expect(mobileDoneMetrics.scrollHeight).toBeGreaterThan(mobileDoneMetrics.clientHeight);
+  await expectPageNoHorizontalOverflow(page);
+  await expectNoHorizontalOverflow(board, "mobile board with dense Done cards");
+  await expectNoHorizontalOverflow(doneColumn, "mobile Done column");
+  await expectNoHorizontalOverflow(firstDoneCard, "mobile first Done card");
 });
 
 test("active run polling refreshes terminal review and needs-attention board states", async ({ page }) => {

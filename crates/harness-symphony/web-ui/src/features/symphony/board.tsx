@@ -80,7 +80,7 @@ export function BoardGrid({
                 </div>
                 <StatusBadge state={state}>{stateItems.length}</StatusBadge>
               </div>
-              <div aria-label={`${state} tasks`} className="grid min-h-0 flex-1 content-start gap-2 overflow-y-auto p-2">
+              <div aria-label={`${state} tasks`} className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
                 {stateItems.map((item) => (
                   <TaskCard key={item.id} item={item} selected={item.id === selectedId} onSelect={onSelect} />
                 ))}
@@ -115,7 +115,7 @@ function TaskCard({
     <button
       onClick={() => onSelect(item.id)}
       className={cn(
-        "block w-full min-w-0 overflow-hidden rounded-md border border-border bg-background p-3 text-left shadow-sm transition hover:border-primary hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "block min-h-[132px] w-full min-w-0 shrink-0 overflow-hidden rounded-md border border-border bg-background p-3 text-left shadow-sm transition hover:border-primary hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         selected && "border-primary shadow-md",
         blocked && "bg-warning/10",
         attention && "bg-destructive/10",
