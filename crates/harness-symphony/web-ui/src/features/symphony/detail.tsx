@@ -359,9 +359,9 @@ export function TaskDetail({
       </Button>
 
       <div className="border-b border-border p-4">
-        <div className="flex items-center justify-between gap-3">
-          <StatusBadge state={item.board_state} />
-          <span className="font-mono text-xs font-bold text-muted-foreground">{item.id}</span>
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <StatusBadge state={item.board_state} className="shrink-0" />
+          <span className="bounded-text min-w-0 font-mono text-xs font-bold text-muted-foreground">{item.id}</span>
         </div>
         <h2 className="bounded-text mt-3 text-2xl font-semibold leading-tight tracking-tight">{item.title}</h2>
         <p className="bounded-text mt-2 text-sm leading-6 text-muted-foreground">{item.reason}</p>
@@ -481,12 +481,14 @@ function ReviewPanel({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
           <SectionTitle>Review evidence</SectionTitle>
-          <p className="mt-1 text-sm leading-6 text-muted-foreground">{review.suggested_next_action}</p>
+          <p className="bounded-text mt-1 text-sm leading-6 text-muted-foreground">{review.suggested_next_action}</p>
         </div>
-        <Badge tone={review.pr_status === "created" ? "accent" : "danger"}>{review.pr_status}</Badge>
+        <Badge tone={review.pr_status === "created" ? "accent" : "danger"} className="shrink-0">
+          {review.pr_status}
+        </Badge>
       </div>
 
       <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
@@ -545,21 +547,21 @@ function ReviewPanel({
 function FailureSummaryPanel({ summary, compact = false }: { summary: FailureSummary; compact?: boolean }) {
   return (
     <div className={cn("rounded-md border border-destructive/30 bg-destructive/10 p-3", compact ? "mt-3" : "")}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 max-w-full flex-1 items-center gap-2">
           <AlertTriangle className="size-4 shrink-0 text-destructive" />
-          <strong className="break-words text-sm font-bold">{summary.category}</strong>
+          <strong className="bounded-text block min-w-0 max-w-full text-sm font-bold">{summary.category}</strong>
         </div>
         <Badge tone="danger" className="max-w-full break-all">
           {summary.run_id}
         </Badge>
       </div>
-      <p className="mt-2 break-words text-sm leading-6 text-foreground">{summary.reason}</p>
+      <p className="bounded-text mt-2 text-sm leading-6 text-foreground">{summary.reason}</p>
       <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
         <Field label="Latest event" value={summary.latest_event ?? "none"} />
         <Field label="Latest error" value={summary.latest_error ?? "none"} />
       </div>
-      <p className="mt-3 text-sm leading-6 text-muted-foreground">{summary.next_action}</p>
+      <p className="bounded-text mt-3 text-sm leading-6 text-muted-foreground">{summary.next_action}</p>
       {!compact ? (
         <ListBlock title="Failure evidence" values={summary.evidence_artifacts} empty="No evidence artifacts found" />
       ) : null}
@@ -597,7 +599,7 @@ function ReviewStatusPanel({ state }: { state: Extract<ReviewState, { status: "l
           {state.statusCode ? `HTTP ${state.statusCode}: ` : ""}
           {state.message}
         </span>
-        <span className="mt-2 block text-destructive">Refresh the board or inspect the run artifacts for {state.runId}.</span>
+        <span className="bounded-text mt-2 block text-destructive">Refresh the board or inspect the run artifacts for {state.runId}.</span>
       </div>
     </div>
   );

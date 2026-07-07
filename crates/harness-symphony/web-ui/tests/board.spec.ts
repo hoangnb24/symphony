@@ -628,6 +628,45 @@ test("needs attention tasks show failure reason and evidence", async ({ page }) 
   await expect(detail.getByText("Inspect APP_SERVER_EVENTS.jsonl and retry when safe.").first()).toBeVisible();
 });
 
+test("needs attention detail keeps long failure category bounded on mobile", async ({ page }) => {
+  const longToken =
+    "NeedsAttentionFailureCategoryShouldWrapInsideTheMobileDetailDialogWithoutCreatingHorizontalOverflow1234567890";
+  const failureSummary = {
+    category: `Category-${longToken}`,
+    reason: `Failure reason ${longToken}`,
+    latest_event: `turn/completed-${longToken}`,
+    latest_error: `error-${longToken}`,
+    run_id: `run_${longToken}`,
+    evidence_artifacts: [`.harness/runs/run_${longToken}/RESULT.json`],
+    next_action: `Inspect ${longToken}`
+  };
+
+  await page.setViewportSize({ width: 390, height: 760 });
+  await page.route("**/api/board", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            ...boardItem("US-066", `Needs Attention ${longToken}`, "Needs Attention"),
+            run_id: `run_${longToken}`,
+            reason: failureSummary.reason,
+            failure_summary: failureSummary
+          }
+        ]
+      })
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /US-066/ }).click();
+
+  const detail = page.getByRole("dialog", { name: "Selected work detail" });
+  await expect(detail.getByText(failureSummary.category)).toBeVisible();
+  await expectNoHorizontalOverflow(page.getByTestId("task-detail-popup"), "mobile needs attention detail popup");
+  await expectPageNoHorizontalOverflow(page);
+});
+
 test("execution recovery retries needs attention work and preserves failed evidence", async ({ page }) => {
   const failureSummary = {
     category: "Codex run failure",
@@ -851,7 +890,7 @@ test("artifact control is explicitly unavailable and long review values stay bou
         pr_url: null,
         pr_status: "missing",
         artifact_paths: [`.harness/runs/run_${longToken}/APP_SERVER_EVENTS.jsonl`],
-        suggested_next_action: "Review long values.",
+        suggested_next_action: `Review long values ${longToken}`,
         failure_summary: null,
         recovery_action: null,
         events: []
