@@ -48,7 +48,7 @@ test("board renders task columns and detail controls", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Needs Attention", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Done", exact: true })).toBeVisible();
 
-  await page.getByPlaceholder("Find task").fill("US-052");
+  await page.getByRole("textbox", { name: "Find task" }).fill("US-052");
   await expect(page.getByRole("button", { name: /US-052/ })).toBeVisible();
   await page.getByRole("button", { name: /US-052/ }).click();
 
@@ -89,6 +89,36 @@ test("task detail close button closes popup and plays bounded confetti", async (
   await expect(page.getByRole("dialog", { name: "Selected work detail" })).toBeVisible();
 });
 
+test("task detail traps focus, closes with escape, and restores opener focus", async ({ page }) => {
+  await page.route("**/api/board", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [boardItem("US-069", "Modal Focus Contract", "Ready")]
+      })
+    });
+  });
+
+  await page.goto("/");
+  const opener = page.getByRole("button", { name: /US-069/ });
+  await opener.click();
+
+  const detail = page.getByRole("dialog", { name: "Selected work detail" });
+  await expect(detail).toBeVisible();
+  for (let index = 0; index < 8; index += 1) {
+    await page.keyboard.press("Tab");
+    await expect
+      .poll(async () =>
+        detail.evaluate((element) => element.contains(document.activeElement))
+      )
+      .toBe(true);
+  }
+
+  await page.keyboard.press("Escape");
+  await expect(detail).toBeHidden();
+  await expect(opener).toBeFocused();
+});
+
 test("task detail close keeps working with reduced motion confetti suppressed", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.route("**/api/board", async (route) => {
@@ -109,6 +139,53 @@ test("task detail close keeps working with reduced motion confetti suppressed", 
 
   await expect(detail).toBeHidden();
   await expect(page.getByTestId("task-close-confetti-host")).toHaveCount(0);
+});
+
+test("reduced motion suppresses operational spinner animation", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.route("**/api/board", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [boardItem("US-069", "Reduced Motion Active Run", "In Progress")]
+      })
+    });
+  });
+
+  await page.goto("/");
+  const spinner = page.locator("#column-in-progress svg").first();
+  await expect(spinner).toBeVisible();
+  await expect
+    .poll(async () => spinner.evaluate((element) => getComputedStyle(element).animationName))
+    .toBe("none");
+});
+
+test("board loading and failure states expose accessibility semantics", async ({ page }) => {
+  let releaseBoard!: () => void;
+  const boardReady = new Promise<void>((resolve) => {
+    releaseBoard = resolve;
+  });
+  await page.route("**/api/board", async (route) => {
+    await boardReady;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ items: [boardItem("US-069", "Accessible Board State", "Ready")] })
+    });
+  });
+
+  const gotoPromise = page.goto("/");
+  await expect(page.locator("#board")).toHaveAttribute("aria-busy", "true");
+  await expect(page.getByRole("status")).toContainText("Loading Symphony board.");
+  releaseBoard();
+  await gotoPromise;
+  await expect(page.locator("#board")).toHaveAttribute("aria-busy", "false");
+  await expect(page.getByRole("status")).toContainText("Symphony board loaded.");
+
+  await page.route("**/api/board", async (route) => {
+    await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "board unavailable" }) });
+  });
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("board unavailable");
 });
 
 test("ready task delete action confirms, retires, and refreshes the board", async ({ page }) => {
@@ -324,6 +401,8 @@ test("board columns stay bounded and scroll dense task lists internally", async 
 
   await page.setViewportSize({ width: 390, height: 760 });
   await expect(readyColumn).toBeVisible();
+  const boardBox = await board.boundingBox();
+  expect(boardBox?.y ?? 9999).toBeLessThan(760);
   const mobileReadyMetrics = await readyTasks.evaluate((element) => ({
     clientHeight: element.clientHeight,
     scrollHeight: element.scrollHeight
@@ -337,6 +416,70 @@ test("board columns stay bounded and scroll dense task lists internally", async 
   await expectNoHorizontalOverflow(longAttentionCard, "mobile long needs attention card");
   await readyColumn.getByRole("button", { name: /US-900/ }).click();
   await expect(page.getByRole("dialog", { name: "Selected work detail" })).toBeVisible();
+});
+
+test("active run polling refreshes terminal review and needs-attention board states", async ({ page }) => {
+  let boardReads = 0;
+  await page.route("**/api/board", async (route) => {
+    boardReads += 1;
+    const reviewItem = boardItem("US-069A", "Terminal Review Refresh", boardReads < 2 ? "In Progress" : "Review");
+    reviewItem.run_id = boardReads < 2 ? "run_review_active" : "run_review_done";
+    reviewItem.active_run = boardReads < 2 ? "run_review_active" : null;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [reviewItem] }) });
+  });
+  await page.route("**/api/runs/run_review_done/review", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        run_id: "run_review_done",
+        story_id: "US-069A",
+        status: "completed",
+        outcome: "completed",
+        summary: "Ready for review.",
+        result: null,
+        validation: null,
+        changed_files: [],
+        changeset_preview: null,
+        pr_url: null,
+        pr_status: "missing",
+        artifact_paths: [],
+        suggested_next_action: "Review terminal state.",
+        failure_summary: null,
+        recovery_action: null,
+        events: []
+      })
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByRole("region", { name: "Review column" }).getByRole("button", { name: /US-069A/ })).toBeVisible({
+    timeout: 5000
+  });
+
+  boardReads = 0;
+  await page.route("**/api/board", async (route) => {
+    boardReads += 1;
+    const attentionItem = boardItem("US-069B", "Terminal Attention Refresh", boardReads < 2 ? "In Progress" : "Needs Attention");
+    attentionItem.run_id = boardReads < 2 ? "run_attention_active" : "run_attention_failed";
+    attentionItem.active_run = boardReads < 2 ? "run_attention_active" : null;
+    attentionItem.failure_summary =
+      boardReads < 2
+        ? null
+        : {
+            category: "Codex run failure",
+            reason: "Terminal failure arrived from the backend.",
+            latest_event: "turn/completed",
+            latest_error: "failed",
+            run_id: "run_attention_failed",
+            evidence_artifacts: [".harness/runs/run_attention_failed/RESULT.json"],
+            next_action: "Inspect the failed run."
+          };
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [attentionItem] }) });
+  });
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Needs Attention column" }).getByRole("button", { name: /US-069B/ })).toBeVisible({
+    timeout: 5000
+  });
 });
 
 test("needs attention tasks show failure reason and evidence", async ({ page }) => {
@@ -477,7 +620,16 @@ test("execution recovery retries needs attention work and preserves failed evide
     });
   });
   await page.route("**/api/runs/run_recovery/events", async (route) => {
-    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ run_id: "run_recovery", events: [] }) });
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        run_id: "run_recovery",
+        events: [
+          { method: "turn/started", params: { turn: { status: "inProgress" } } },
+          { method: "item/agentMessage/delta", params: { itemId: "retry_msg", delta: "Retry run is now live." } }
+        ]
+      })
+    });
   });
 
   await page.goto("/");
@@ -488,7 +640,27 @@ test("execution recovery retries needs attention work and preserves failed evide
   await detail.getByRole("button", { name: "Retry work" }).click();
 
   await expect(page.getByRole("button", { name: /US-067/ })).toContainText("active");
+  await expect(detail.getByRole("heading", { name: "Prior failed run evidence" })).toBeVisible();
   await expect(detail.getByText(".harness/runs/run_failed/APP_SERVER_EVENTS.jsonl").first()).toBeVisible();
+  await expect(detail.getByRole("heading", { name: "Run communication" })).toBeVisible();
+  await expect(detail.getByText("Retry run is now live.")).toBeVisible();
+});
+
+test("review endpoint failures render explicit alert evidence", async ({ page }) => {
+  await page.route("**/api/board", async (route) => {
+    const item = boardItem("US-069", "Review Error State", "Review");
+    item.run_id = "run_review_error";
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [item] }) });
+  });
+  await page.route("**/api/runs/run_review_error/review", async (route) => {
+    await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "review exploded" }) });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /US-069/ }).click();
+  const detail = page.getByRole("dialog", { name: "Selected work detail" });
+  await expect(detail.getByRole("alert")).toContainText("review exploded");
+  await expect(detail.getByText("run_review_error", { exact: true }).first()).toBeVisible();
 });
 
 test("pr retry recovers completed needs attention runs without rerunning work", async ({ page }) => {
@@ -571,6 +743,49 @@ test("pr retry recovers completed needs attention runs without rerunning work", 
 
   await expect(detail.getByText("https://example.test/pr/67")).toBeVisible();
   await expect(detail.getByRole("button", { name: "Mark Merged" })).toBeEnabled();
+});
+
+test("artifact control is explicitly unavailable and long review values stay bounded on mobile", async ({ page }) => {
+  const longToken =
+    "VeryLongReviewArtifactPathChangedFileBlockerChildAndRunIdentifierThatMustWrapInsideTheMobileDialog1234567890";
+  await page.setViewportSize({ width: 390, height: 760 });
+  await page.route("**/api/board", async (route) => {
+    const item = boardItem("US-069", `Long Review ${longToken}`, "Review");
+    item.run_id = `run_${longToken}`;
+    item.blockers = [`US-BLOCKER-${longToken}`];
+    item.children = [`US-CHILD-${longToken}`];
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [item] }) });
+  });
+  await page.route(`**/api/runs/run_${longToken}/review`, async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        run_id: `run_${longToken}`,
+        story_id: "US-069",
+        status: "completed",
+        outcome: "completed",
+        summary: `Summary ${longToken}`,
+        result: null,
+        validation: { artifact: longToken },
+        changed_files: [`crates/harness-symphony/web-ui/src/${longToken}.tsx`],
+        changeset_preview: null,
+        pr_url: null,
+        pr_status: "missing",
+        artifact_paths: [`.harness/runs/run_${longToken}/APP_SERVER_EVENTS.jsonl`],
+        suggested_next_action: "Review long values.",
+        failure_summary: null,
+        recovery_action: null,
+        events: []
+      })
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /US-069/ }).click();
+  const detail = page.getByRole("dialog", { name: "Selected work detail" });
+  await expect(detail.getByRole("button", { name: "Open artifacts" })).toBeDisabled();
+  await expect(detail.getByRole("button", { name: "Open artifacts" })).toHaveAttribute("title", /not available/);
+  await expectNoHorizontalOverflow(detail, "mobile detail dialog");
 });
 
 test("review logs render readable chat and progress entries while preserving raw artifacts", async ({ page }) => {

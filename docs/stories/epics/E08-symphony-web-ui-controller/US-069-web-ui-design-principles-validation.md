@@ -2,7 +2,7 @@
 
 ## Status
 
-planned
+implemented
 
 ## Lane
 
@@ -69,4 +69,46 @@ new repeatable workflow.
 
 ## Evidence
 
-Add commands, reports, screenshots, or links after validation exists.
+Implemented after the 2026-07-07 deep and second-pass frontend audits.
+
+Closed audit issues:
+
+- Active-run board polling refreshes terminal `Review` and `Needs Attention`
+  state without manual refresh.
+- Active retry communication renders live retry events while prior failed-run
+  evidence remains in a distinct panel.
+- Review endpoint failures render explicit loading/error states with alert
+  semantics.
+- `Open artifacts` is no longer an enabled no-op; it is disabled with a clear
+  unavailable reason while artifact paths remain visible in review evidence.
+- Task detail dialog traps focus, closes on Escape/backdrop, and restores focus
+  to the opener.
+- Search, board loading, errors, and live run updates expose durable accessible
+  names/status semantics.
+- Reduced-motion mode suppresses operational spinner animation.
+- Mobile layout brings the board into the first viewport, and long review/detail
+  values remain bounded.
+- Symphony status tones moved out of the generic `Badge` primitive into
+  feature-owned status mapping.
+- API responses now pass through a typed frontend parse boundary before state
+  updates.
+- Board/sidebar/detail/review/event-log/status/API modules were extracted from
+  the `main.tsx` composition surface.
+
+Validation passed:
+
+```bash
+npm --prefix crates/harness-symphony/web-ui run build
+npm --prefix crates/harness-symphony/web-ui run e2e
+cargo test -p harness-symphony web -- --nocapture
+cargo test --workspace
+cargo fmt --check
+cargo clippy --workspace -- -D warnings
+npm --prefix crates/harness-symphony/web-ui run desktop:smoke
+git diff --check
+```
+
+Design-validation tooling was a clean skip: Harness has no present registered
+provider for `accessibility`, `performance-benchmark`, `coverage`, or
+design-validation, so deterministic Playwright desktop/mobile behavior and
+overflow assertions are the current platform proof.
