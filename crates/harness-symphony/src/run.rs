@@ -127,6 +127,7 @@ pub fn prepare_run(config: &ResolvedConfig, story_id: &str) -> Result<PreparedRu
     fs::create_dir_all(&run_dir)?;
     create_worktree(&config.repo_root, &branch, &worktree)?;
     fs::copy(&config.harness_db, &harness_db_path)?;
+    mark_story_in_progress(&harness_db_path, story_id)?;
 
     let contract = build_contract(
         config,
@@ -315,6 +316,15 @@ fn create_worktree(repo_root: &Path, branch: &str, worktree: &Path) -> Result<()
     }
 }
 
+fn mark_story_in_progress(db_path: &Path, story_id: &str) -> Result<(), RunError> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "UPDATE story SET status='in_progress' WHERE id=?1 AND status='planned';",
+        params![story_id],
+    )?;
+    Ok(())
+}
+
 fn build_contract(
     config: &ResolvedConfig,
     run_id: &str,
@@ -367,6 +377,7 @@ fn build_contract(
         forbidden_paths,
         agent_instructions: vec![
             "Follow AGENTS.md and Harness docs.".to_owned(),
+            "For resolver stories, record a completed implementation trace and then run scripts/bin/harness-cli story complete <story-id>; story verify is proof-only.".to_owned(),
             "Implement only the assigned story scope.".to_owned(),
             "Use the copied harness.db.".to_owned(),
             "Run the configured verification command when available.".to_owned(),
