@@ -127,6 +127,7 @@ pub fn prepare_run(config: &ResolvedConfig, story_id: &str) -> Result<PreparedRu
     fs::create_dir_all(&run_dir)?;
     create_worktree(&config.repo_root, &branch, &worktree)?;
     fs::copy(&config.harness_db, &harness_db_path)?;
+    mark_story_in_progress(&harness_db_path, story_id)?;
 
     let contract = build_contract(
         config,
@@ -185,6 +186,7 @@ pub fn prepare_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Prepa
     fs::create_dir_all(&run_dir)?;
     fs::create_dir_all(&local_run_dir)?;
     fs::copy(&config.harness_db, &harness_db_path)?;
+    mark_story_in_progress(&harness_db_path, story_id)?;
 
     let contract = build_contract(
         config,
@@ -315,6 +317,15 @@ fn create_worktree(repo_root: &Path, branch: &str, worktree: &Path) -> Result<()
     }
 }
 
+fn mark_story_in_progress(db_path: &Path, story_id: &str) -> Result<(), RunError> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "UPDATE story SET status='in_progress' WHERE id=?1 AND status='planned';",
+        params![story_id],
+    )?;
+    Ok(())
+}
+
 fn build_contract(
     config: &ResolvedConfig,
     run_id: &str,
@@ -367,6 +378,7 @@ fn build_contract(
         forbidden_paths,
         agent_instructions: vec![
             "Follow AGENTS.md and Harness docs.".to_owned(),
+            "For resolver stories, record a completed implementation trace and then run scripts/bin/harness-cli story complete <story-id>; story verify is proof-only.".to_owned(),
             "Implement only the assigned story scope.".to_owned(),
             "Use the copied harness.db.".to_owned(),
             "Run the configured verification command when available.".to_owned(),
@@ -757,6 +769,55 @@ mod tests {
     }
 
     #[test]
+    fn run_contract_requires_explicit_story_completion_order() {
+        let contract = build_contract(
+            &config(),
+            "run_completion",
+            "US-077",
+            false,
+            Path::new("/repo/.symphony/worktrees/run_completion"),
+            Path::new("/repo/.symphony/worktrees/run_completion/harness.db"),
+        );
+
+        assert!(contract.agent_instructions.iter().any(|instruction| {
+            instruction.contains("record a completed implementation trace")
+                && instruction.contains("story complete <story-id>")
+                && instruction.contains("story verify is proof-only")
+        }));
+    }
+
+    #[test]
+    fn run_contract_copied_story_enters_in_progress_before_completion() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("harness.db");
+        write_story_db(&db_path, "US-077", "planned", "high_risk");
+
+        mark_story_in_progress(&db_path, "US-077").unwrap();
+
+        let connection = Connection::open(&db_path).unwrap();
+        let status: String = connection
+            .query_row("SELECT status FROM story WHERE id='US-077';", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "in_progress");
+
+        connection
+            .execute(
+                "UPDATE story SET status='implemented' WHERE id='US-077';",
+                [],
+            )
+            .unwrap();
+        mark_story_in_progress(&db_path, "US-077").unwrap();
+        let terminal_status: String = connection
+            .query_row("SELECT status FROM story WHERE id='US-077';", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(terminal_status, "implemented");
+    }
+
+    #[test]
     fn here_contract_marks_lightweight_and_repo_root() {
         let config = config();
         let contract = build_contract(
@@ -902,11 +963,37 @@ mod tests {
             .starts_with(temp_dir.path().join(".symphony/runs")));
         assert!(!config.worktrees_dir.exists());
 
+        let copied_status: String = Connection::open(&prepared.harness_db_path)
+            .unwrap()
+            .query_row("SELECT status FROM story WHERE id='US-TINY'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(copied_status, "in_progress");
+
         let run = RunStateStore::new(config.state_db.clone())
             .show_run(&prepared.run_id)
             .unwrap();
         assert!(run.lightweight);
         assert_eq!(run.branch, None);
+    }
+
+    #[test]
+    fn review_finding_lightweight_copy_enters_in_progress() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        write_story_db(&config.harness_db, "US-REVIEW-TINY", "planned", "tiny");
+
+        let prepared = prepare_here_run(&config, "US-REVIEW-TINY").unwrap();
+        let status: String = Connection::open(prepared.harness_db_path)
+            .unwrap()
+            .query_row(
+                "SELECT status FROM story WHERE id='US-REVIEW-TINY'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "in_progress");
     }
 
     #[test]
