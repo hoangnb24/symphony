@@ -377,11 +377,12 @@ cancelled
 `blocked` and `needs_intake` are run outcomes in v1. They should not be written
 into `story.status` unless the Harness schema explicitly supports them.
 
-For completion-enabled resolver stories, Symphony's copied database moves the
-planned story to `in_progress` before the agent starts. The agent must record the
-completed implementation trace before invoking `harness-cli story complete`.
-That command owns fresh verification, the implemented transition, and atomic
-resolver backlog closure; `story verify` alone never completes the lifecycle.
+For completion-enabled resolver stories, both isolated-worktree and lightweight
+`--here` preparation move the planned story in Symphony's copied database to
+`in_progress` before the agent starts. The agent must record the completed
+implementation trace before invoking `harness-cli story complete`. That command
+owns fresh verification, the implemented transition, and atomic resolver backlog
+closure; `story verify` alone never completes the lifecycle.
 
 #### 4.7 Local Status
 

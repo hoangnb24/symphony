@@ -186,6 +186,7 @@ pub fn prepare_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Prepa
     fs::create_dir_all(&run_dir)?;
     fs::create_dir_all(&local_run_dir)?;
     fs::copy(&config.harness_db, &harness_db_path)?;
+    mark_story_in_progress(&harness_db_path, story_id)?;
 
     let contract = build_contract(
         config,
@@ -962,11 +963,37 @@ mod tests {
             .starts_with(temp_dir.path().join(".symphony/runs")));
         assert!(!config.worktrees_dir.exists());
 
+        let copied_status: String = Connection::open(&prepared.harness_db_path)
+            .unwrap()
+            .query_row("SELECT status FROM story WHERE id='US-TINY'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(copied_status, "in_progress");
+
         let run = RunStateStore::new(config.state_db.clone())
             .show_run(&prepared.run_id)
             .unwrap();
         assert!(run.lightweight);
         assert_eq!(run.branch, None);
+    }
+
+    #[test]
+    fn review_finding_lightweight_copy_enters_in_progress() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        write_story_db(&config.harness_db, "US-REVIEW-TINY", "planned", "tiny");
+
+        let prepared = prepare_here_run(&config, "US-REVIEW-TINY").unwrap();
+        let status: String = Connection::open(prepared.harness_db_path)
+            .unwrap()
+            .query_row(
+                "SELECT status FROM story WHERE id='US-REVIEW-TINY'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "in_progress");
     }
 
     #[test]
