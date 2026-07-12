@@ -58,8 +58,12 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          tests/compatibility/test-harness-protocol.sh
-          tests/compatibility/test-agent-preflight.sh
+          cli_fixture="$RUNNER_TEMP/symphony-compatibility-cli"
+          tests/compatibility/bootstrap-harness-fixture.sh \
+            --upgrade-cli --story US-CI-COMPAT "$cli_fixture"
+          cli="$cli_fixture/scripts/bin/harness-cli"
+          HARNESS_CLI_PATH="$cli" tests/compatibility/test-harness-protocol.sh
+          HARNESS_CLI_PATH="$cli" tests/compatibility/test-agent-preflight.sh
       - name: Install Web UI dependencies
         run: npm --prefix crates/harness-symphony/web-ui ci
       - name: Build Web UI
