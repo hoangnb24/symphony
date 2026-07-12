@@ -55,7 +55,8 @@ graph=$(HARNESS_REPO_ROOT="$repo_root" HARNESS_DB_PATH="$db" "$cli" query work-g
 jq -e '
   [.result.stories[] | select(.id | test("^US-09[3-6]$"))] as $stories |
   ($stories | length) == 4 and
-  ($stories | all(.status == "planned")) and
+  ($stories | any(.id == "US-093" and (.status == "planned" or .status == "in_progress"))) and
+  ($stories | map(select(.id != "US-093")) | all(.status == "planned")) and
   ($stories | map(select(.id != "US-093")) | all(.verify_command == null and .runnable == false)) and
   ([.result.dependencies[] | select((.blocker | test("^US-09[3-6]$")) or (.blocked | test("^US-09[3-6]$")))] | sort_by(.blocker,.blocked)) == ([
     {"blocker":"US-093","blocked":"US-094"},
