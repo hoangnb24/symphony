@@ -85,7 +85,7 @@ HARNESS_DB_PATH="$isolated" "$cli" trace --summary "$wal_summary" --outcome comp
 snapshot=$(HARNESS_DB_PATH="$isolated" "$cli" db snapshot --output "$temp/wal-snapshot.db" --json)
 jq -e '.result.source_logical_sha256 | length == 64' <<<"$snapshot" >/dev/null
 HARNESS_DB_PATH="$temp/wal-snapshot.db" "$cli" query sql "SELECT task_summary FROM trace WHERE task_summary = '$wal_summary';" | rg -Fq "$wal_summary"
-exec 3>&-; wait "$reader_pid"; unset reader_pid
+exec 3>&-; wait "$reader_pid"; reader_pid=
 
 # Registered-but-missing optional providers weaken proof but do not block the
 # same doctor/work/prepare operator path.
@@ -128,3 +128,4 @@ if rg -n '/repository-harness|/symphony|Documents/personal' "$run_fixture" --glo
 jq -n --arg tag "$tag" --arg prepare_hash "$before" --arg run_id "$run_id" --arg merge_sha "$merge_sha" --arg first "$first" --arg second "$second" '{story:"US-095",harness_release:$tag,prepare_root_logical_sha256:$prepare_hash,run_id:$run_id,local_merge_sha:$merge_sha,first_sync:$first,second_sync:$second}' >"$temp/evidence.json"
 cat "$temp/evidence.json"
 git -C "$root" diff --check
+echo "US-095 cross-repository standalone parity verification passed"
