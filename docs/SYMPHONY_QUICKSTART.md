@@ -1,23 +1,48 @@
 # Symphony Quick Start
 
 This guide is for an operator running a built Symphony artifact against a
-Harness-enabled target repository. Packaged release downloads arrive in US-096;
-for now, use a locally built artifact supplied from this source repository.
+Harness-enabled target repository. US-096 produces checksum-verifiable local
+and CI release candidates, but does not publish a remote release.
 
 ## 1. Choose the artifact and target repository
 
-The artifact can live anywhere. Always identify the target with `--repo-root`,
-which makes commands independent of the current working directory.
+Verify the archive before extracting it. Keep its `bin/` and `share/`
+directories under one installation root because the executable validates and
+loads `share/harness-symphony/resource-manifest.json` and the Web assets it
+describes. Runtime validation checks the manifest version, paths, hash shape,
+and required index. The release verifier recomputes the Web tree hash and
+binds the actual bytes to the archive checksum before installation.
 
 ```bash
+ARCHIVE=/absolute/path/to/harness-symphony-<target>.tar.gz
+(cd "$(dirname "$ARCHIVE")" && shasum -a 256 -c "$(basename "$ARCHIVE").sha256")
+INSTALL_ROOT="$HOME/.local"
+mkdir -p "$INSTALL_ROOT"
+tar -xzf "$ARCHIVE" -C "$INSTALL_ROOT"
+SYMPHONY="$INSTALL_ROOT/bin/harness-symphony"
+# Or point to an already unpacked verified archive:
 SYMPHONY=/absolute/path/to/harness-symphony
 REPO=/absolute/path/to/target-repository
 ```
 
 ```powershell
+$Archive = "C:\absolute\path\to\harness-symphony-windows-x64.tar.gz"
+$Expected = ((Get-Content "$Archive.sha256") -split '\s+')[0].ToLowerInvariant()
+$Actual = (Get-FileHash -Algorithm SHA256 $Archive).Hash.ToLowerInvariant()
+if ($Actual -ne $Expected) { throw "Symphony archive checksum mismatch" }
+$InstallRoot = Join-Path $env:LOCALAPPDATA "Programs\Symphony"
+New-Item -ItemType Directory -Force $InstallRoot | Out-Null
+tar -xzf $Archive -C $InstallRoot
+$Symphony = Join-Path $InstallRoot "bin\harness-symphony.exe"
+# Or point to an already unpacked verified archive:
 $Symphony = "C:\absolute\path\to\harness-symphony.exe"
 $Repo = "C:\absolute\path\to\target-repository"
 ```
+
+Always identify the target with `--repo-root`; the command then works from any
+current directory. Signing, notarization, and auto-update are deferred, so the
+archive checksum and trusted artifact provenance are the current integrity
+controls.
 
 The target needs a compatible Harness CLI and an initialized Harness database.
 Symphony discovers the executable according to the

@@ -15,12 +15,43 @@ database. The typed boundary is documented in
 An operator runs a built Symphony executable against the repository that owns
 the stories. The repository can be different from the current directory.
 
-Packaged Symphony release assets are planned in US-096 and are not published
-yet. Today, obtain a locally built executable from a Symphony contributor and
-set its path explicitly:
+US-096 produces local/CI release candidates; it does not publish them remotely.
+Obtain the archive and its `.sha256` file from the local `dist/` output or an
+authorized CI artifact, then verify and install it without Cargo.
+Runtime checks the packaged resource manifest's paths and shape; the release
+verifier is the proof that its Web tree hash matches the packaged bytes.
+
+On macOS or Linux, preserve the archive's `bin/` and `share/` relationship:
 
 ```bash
+ARCHIVE=/absolute/path/to/harness-symphony-<target>.tar.gz
+(cd "$(dirname "$ARCHIVE")" && shasum -a 256 -c "$(basename "$ARCHIVE").sha256")
+INSTALL_ROOT="$HOME/.local"
+mkdir -p "$INSTALL_ROOT"
+tar -xzf "$ARCHIVE" -C "$INSTALL_ROOT"
+SYMPHONY="$INSTALL_ROOT/bin/harness-symphony"
+# Or point to an already unpacked verified archive:
 SYMPHONY=/absolute/path/to/harness-symphony
+```
+
+On Windows, compare the archive against its checksum file before expanding it:
+
+```powershell
+$Archive = "C:\absolute\path\to\harness-symphony-windows-x64.tar.gz"
+$Expected = ((Get-Content "$Archive.sha256") -split '\s+')[0].ToLowerInvariant()
+$Actual = (Get-FileHash -Algorithm SHA256 $Archive).Hash.ToLowerInvariant()
+if ($Actual -ne $Expected) { throw "Symphony archive checksum mismatch" }
+$InstallRoot = Join-Path $env:LOCALAPPDATA "Programs\Symphony"
+New-Item -ItemType Directory -Force $InstallRoot | Out-Null
+tar -xzf $Archive -C $InstallRoot
+$Symphony = Join-Path $InstallRoot "bin\harness-symphony.exe"
+# Or point to an already unpacked verified archive:
+$Symphony = "C:\absolute\path\to\harness-symphony.exe"
+```
+
+Then select the target repository explicitly:
+
+```bash
 REPO=/absolute/path/to/your-harness-repository
 
 "$SYMPHONY" --repo-root "$REPO" doctor
@@ -29,7 +60,6 @@ REPO=/absolute/path/to/your-harness-repository
 ```
 
 ```powershell
-$Symphony = "C:\absolute\path\to\harness-symphony.exe"
 $Repo = "C:\absolute\path\to\your-harness-repository"
 
 & $Symphony --repo-root $Repo doctor

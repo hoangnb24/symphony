@@ -36,7 +36,7 @@ a particular source-repository layout.
 
 | Area | Current contract | Future / out of current scope |
 | --- | --- | --- |
-| Invocation | Local CLI and Web/desktop controller; explicit `--repo-root` | Published packaged release assets (US-096), hosted service |
+| Invocation | Local CLI and Web/desktop controller; explicit `--repo-root`; checksum-verifiable local/CI release candidate | Remote publication (US-100), hosted service |
 | Work discovery | One revisioned typed work-graph read with lane, status, dependencies, hierarchy, and revision | External issue trackers as the authoritative work model |
 | Selection | Runnable work listing and explicit story runs; bounded unattended polling for opted-in work | Unbounded scheduler, distributed queue, multiple concurrent writers |
 | Isolation | Git worktree for normal/high-risk; tiny `--here`; protocol-created WAL-safe DB snapshot | Container/VM sandboxing or remote execution |
@@ -117,15 +117,23 @@ changeset, asks Harness to apply it once, and records local sync state.
 
 ## Configuration and distribution
 
-Configuration is target-repository-relative and optional. Start from
+Configuration is target-repository-relative and optional. A normal Harness
+repository with a compatible CLI and current database works with defaults;
+desktop discovery validates that public contract rather than looking for
+Symphony source. Start from
 [`examples/symphony.yml`](../examples/symphony.yml), then create
 `.harness/symphony.yml` in the target only for settings that differ from
 defaults. CLI discovery and upgrade details are normative in the
 [`runtime contract`](contracts/harness-runtime-v1.md).
 
-The repository currently produces locally built artifacts. US-096 owns release
-packaging, checksums, platform archives, and publication; until it completes,
-this contract makes no claim that a downloadable Symphony distribution exists.
+The stable archive layout is `bin/harness-symphony(.exe)`,
+`share/harness-symphony/web-ui/**`, and
+`share/harness-symphony/resource-manifest.json`. The executable validates the
+manifest paths and shape before serving packaged assets. The release verifier
+recomputes the Web tree hash to validate the asset bytes. Local and CI release
+candidates carry per-archive checksums and release provenance; remote
+publication remains gated by US-100. Signing, notarization, and auto-update are
+explicitly deferred.
 
 ## Explicit non-goals
 
