@@ -74,6 +74,8 @@ pub struct RepoConfig {
     pub root: PathBuf,
     #[serde(default = "default_harness_db")]
     pub harness_db: PathBuf,
+    #[serde(default, alias = "harness_cli_path")]
+    pub harness_cli: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -163,6 +165,7 @@ impl Default for RepoConfig {
         Self {
             root: default_repo_root(),
             harness_db: default_harness_db(),
+            harness_cli: None,
         }
     }
 }
@@ -278,6 +281,17 @@ impl SymphonyConfig {
             auto_max_attempts: self.auto.max_attempts,
             repo_root,
         }
+    }
+
+    /// Resolve the optional operator-pinned Harness CLI against the same
+    /// repository root used by [`Self::resolve`].
+    #[allow(dead_code)] // consumed as protocol call sites migrate during US-093
+    pub fn resolve_harness_cli(&self, current_root: &Path) -> Option<PathBuf> {
+        let repo_root = normalize_path(current_root, &self.repo.root);
+        self.repo
+            .harness_cli
+            .as_ref()
+            .map(|path| normalize_path(&repo_root, path))
     }
 }
 
@@ -422,6 +436,7 @@ version: 1
 repo:
   root: "workspace"
   harness_db: "db/copy.db"
+  harness_cli: "tools with spaces/harness-cli"
 agent:
   command:
     - "codex"
@@ -442,6 +457,12 @@ auto:
         assert_eq!(
             resolved.harness_db,
             PathBuf::from("/repo/workspace/db/copy.db")
+        );
+        assert_eq!(
+            config.resolve_harness_cli(Path::new("/repo")),
+            Some(PathBuf::from(
+                "/repo/workspace/tools with spaces/harness-cli"
+            ))
         );
         assert_eq!(resolved.agent_command, vec!["codex", "app-server"]);
         assert_eq!(resolved.compact_keep_last, 10);
