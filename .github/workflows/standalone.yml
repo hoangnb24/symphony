@@ -58,6 +58,8 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq ripgrep sqlite3
           cli_fixture="$RUNNER_TEMP/symphony-compatibility-cli"
           tests/compatibility/bootstrap-harness-fixture.sh \
             --upgrade-cli --story US-CI-COMPAT "$cli_fixture"
@@ -98,6 +100,15 @@ jobs:
         run: npm --prefix crates/harness-symphony/web-ui ci
       - name: Install Chromium and system dependencies
         run: npm --prefix crates/harness-symphony/web-ui exec -- playwright install --with-deps chromium
+      - name: Bootstrap external Playwright fixture
+        shell: bash
+        run: |
+          fixture="$RUNNER_TEMP/symphony-playwright-fixture"
+          tests/compatibility/bootstrap-harness-fixture.sh \
+            --upgrade-cli --story US-PLAYWRIGHT "$fixture"
+          npm --prefix crates/harness-symphony/web-ui run build
+          echo "PLAYWRIGHT_REPO_ROOT=$fixture" >> "$GITHUB_ENV"
+          echo "HARNESS_SYMPHONY_WEB_DIST_DIR=$GITHUB_WORKSPACE/crates/harness-symphony/web-ui/dist" >> "$GITHUB_ENV"
       - name: Run Playwright tests
         run: npm --prefix crates/harness-symphony/web-ui run e2e
 

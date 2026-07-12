@@ -203,7 +203,6 @@ mod tests {
     use crate::config::ResolvedConfig;
     use rusqlite::{params, Connection};
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     fn config_for_root(root: &Path) -> ResolvedConfig {
@@ -218,7 +217,7 @@ else
   exit 64
 fi
 "#).unwrap();
-        fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
+        make_executable(&cli);
         ResolvedConfig {
             version: 1,
             repo_root: root.to_path_buf(),
@@ -245,6 +244,15 @@ fi
             auto_max_attempts: 2,
         }
     }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
 
     fn write_story_db(path: &Path, id: &str) {
         let connection = Connection::open(path).unwrap();
@@ -314,6 +322,7 @@ fi
         assert!(matches!(error, AutoError::AdapterBoundary(source) if source == "github-issues"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn harness_db_source_feeds_one_queued_run() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -374,6 +383,7 @@ fi
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_run_is_retried_until_success() {
         let temp_dir = tempfile::tempdir().unwrap();

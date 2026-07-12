@@ -539,21 +539,30 @@ mod tests {
     use super::*;
     use crate::config::ResolvedConfig;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
+    #[cfg(unix)]
     fn install_protocol_cli(temp: &tempfile::TempDir, config: &mut ResolvedConfig) {
         let cli = temp.path().join("fake-harness-cli");
         fs::write(&cli, r#"#!/bin/sh
 printf '%s\n' '{"protocol_version":1,"operation":"query.contract","request_id":null,"result":{"protocol_version":1,"cli_version":"0.1.14","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]},"error":null}'
 "#).unwrap();
-        let mut permissions = fs::metadata(&cli).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&cli, permissions).unwrap();
+        make_executable(&cli);
         config.harness_cli = Some(cli);
         config.repo_root = temp.path().to_path_buf();
         config.harness_db = temp.path().join("harness.db");
     }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
 
     fn config(adapter: &str, command: Vec<&str>) -> ResolvedConfig {
         ResolvedConfig {
@@ -695,9 +704,7 @@ printf '%s\n' '{"protocol_version":1,"operation":"query.contract","request_id":n
         let temp_dir = tempfile::tempdir().unwrap();
         let cli = temp_dir.path().join("Harness CLI with spaces");
         fs::write(&cli, "#!/bin/sh\n").unwrap();
-        let mut permissions = fs::metadata(&cli).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&cli, permissions).unwrap();
+        make_executable(&cli);
         let mut config = config("codex", vec![]);
         config.repo_root = temp_dir.path().to_path_buf();
         config.harness_cli = Some(cli.clone());
@@ -716,6 +723,7 @@ printf '%s\n' '{"protocol_version":1,"operation":"query.contract","request_id":n
         assert!(prompt.contains("\"result\":\"pass\""));
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_completes_json_rpc_handshake() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -737,9 +745,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
 "#,
         )
         .unwrap();
-        let mut permissions = fs::metadata(&fake_server).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_server, permissions).unwrap();
+        make_executable(&fake_server);
 
         let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
         install_protocol_cli(&temp_dir, &mut config);
@@ -752,6 +758,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
         run_codex_agent(&config, &prepared).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_does_not_use_agent_timeout_as_wall_clock_deadline() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -776,9 +783,7 @@ printf '%s\n' '{"id":4,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"
 "#,
         )
         .unwrap();
-        let mut permissions = fs::metadata(&fake_server).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_server, permissions).unwrap();
+        make_executable(&fake_server);
 
         let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
         install_protocol_cli(&temp_dir, &mut config);
@@ -791,6 +796,7 @@ printf '%s\n' '{"id":4,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"
         run_codex_agent(&config, &prepared).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_reports_failed_terminal_turn() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -811,9 +817,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
 "#,
         )
         .unwrap();
-        let mut permissions = fs::metadata(&fake_server).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_server, permissions).unwrap();
+        make_executable(&fake_server);
 
         let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
         install_protocol_cli(&temp_dir, &mut config);
@@ -826,6 +830,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
         assert!(error.to_string().contains("turn status was failed: boom"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_recovers_completed_turn_from_state_query() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -848,9 +853,7 @@ printf '%s\n' '{"id":3,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"
 "#,
         )
         .unwrap();
-        let mut permissions = fs::metadata(&fake_server).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_server, permissions).unwrap();
+        make_executable(&fake_server);
 
         let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
         install_protocol_cli(&temp_dir, &mut config);

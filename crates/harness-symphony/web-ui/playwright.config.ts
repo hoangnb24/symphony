@@ -1,6 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const chromiumExecutablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+const externalRepoRoot = process.env.PLAYWRIGHT_REPO_ROOT;
+const repoRootArgument = externalRepoRoot
+  ? ` --repo-root ${JSON.stringify(externalRepoRoot)}`
+  : "";
 
 export default defineConfig({
   testDir: "./tests",
@@ -14,7 +18,7 @@ export default defineConfig({
   },
   webServer: {
     command:
-      "cd ../../.. && cargo build -p harness-symphony && target/debug/harness-symphony web --host 127.0.0.1 --port 43219",
+      `cd ../../.. && cargo build -p harness-symphony && target/debug/harness-symphony${repoRootArgument} web --host 127.0.0.1 --port 43219`,
     url: "http://127.0.0.1:43219/health",
     reuseExistingServer: false,
     timeout: 30_000

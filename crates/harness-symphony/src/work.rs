@@ -511,7 +511,9 @@ fn is_auto_eligible(item: &WorkItem) -> bool {
 #[cfg(test)]
 mod protocol_tests {
     use super::*;
+    #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
     use std::path::PathBuf;
 
     #[cfg(unix)]
