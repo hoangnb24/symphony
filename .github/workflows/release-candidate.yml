@@ -77,6 +77,10 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: brew install ripgrep
+      - name: Install Windows compatibility dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install ripgrep --yes --no-progress
       - name: Run native Rust gates
         run: |
           cargo fmt --check
