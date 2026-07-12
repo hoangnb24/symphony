@@ -258,7 +258,13 @@ fn check_gitignore(config: &ResolvedConfig) -> DoctorCheck {
     ];
     let missing = required
         .iter()
-        .filter(|entry| !text.lines().any(|line| line.trim() == **entry))
+        .filter(|entry| {
+            !text
+                .lines()
+                .map(str::trim)
+                .map(|line| line.strip_prefix('/').unwrap_or(line))
+                .any(|line| line == **entry)
+        })
         .copied()
         .collect::<Vec<_>>();
     if missing.is_empty() {
