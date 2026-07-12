@@ -583,10 +583,10 @@ function TextBlock({ title, text }: { title: string; text: string }) {
 function ReviewStatusPanel({ state }: { state: Extract<ReviewState, { status: "loading" | "error" }> }) {
   if (state.status === "loading") {
     return (
-      <div className="border-b border-border p-4" role="status" aria-live="polite">
-        <div className="flex items-center gap-2 rounded-md border border-border bg-muted p-3 text-sm text-muted-foreground">
-          <Loader2 className="size-4 motion-safe:animate-spin" />
-          Loading review evidence for {state.runId}.
+      <div className="min-w-0 max-w-full border-b border-border p-4" role="status" aria-live="polite">
+        <div className="flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-md border border-border bg-muted p-3 text-sm text-muted-foreground">
+          <Loader2 className="size-4 shrink-0 motion-safe:animate-spin" />
+          <span className="bounded-text min-w-0 max-w-full">Loading review evidence for {state.runId}.</span>
         </div>
       </div>
     );
