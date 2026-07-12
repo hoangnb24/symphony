@@ -40,8 +40,11 @@ try {
   for ($i = 0; $i -lt 300; $i++) {
     if ($process.HasExited) { throw "Web backend exited early: $(Get-Content $stderr -Raw)" }
     if (Test-Path $stdout) {
-      $match = [regex]::Match((Get-Content $stdout -Raw), 'http://127\.0\.0\.1:\d+')
-      if ($match.Success) { $base = $match.Value; break }
+      $content = Get-Content $stdout -Raw
+      if ($null -ne $content) {
+        $match = [regex]::Match($content, 'http://127\.0\.0\.1:\d+')
+        if ($match.Success) { $base = $match.Value; break }
+      }
     }
     Start-Sleep -Milliseconds 100
   }
