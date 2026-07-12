@@ -56,10 +56,10 @@ case "$target" in
   x86_64-unknown-linux-gnu) label=linux-x64 ;;
   *) echo "unsupported local release target: $target" >&2; exit 1 ;;
 esac
-export SYMPHONY_RELEASE_ALLOW_DIRTY_TEST_ONLY=1
 cargo build --workspace --release --locked --target "$target"
 native_binary="$root/target/$target/release/harness-symphony"
 SOURCE_SHA=$(git rev-parse HEAD) \
+SYMPHONY_RELEASE_ALLOW_DIRTY_TEST_ONLY=1 \
 SYMPHONY_RELEASE_TARGET="$target" \
 SYMPHONY_RELEASE_LABEL="$label" \
 SYMPHONY_RELEASE_OUTPUT="$temp/dist" \

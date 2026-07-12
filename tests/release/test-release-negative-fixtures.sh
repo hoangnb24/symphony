@@ -2,7 +2,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 manifest=${1:-"$root/dist/release-manifest.json"}
-temp=$(mktemp -d); dirty="$root/crates/harness-symphony/.us096-dirty-test"; trap 'rm -rf "$temp"; rm -f "$dirty"' EXIT
+temp=$(mktemp -d); dirty="$root/crates/harness-symphony/.us096-dirty-test-$$"; trap 'rm -rf "$temp"; rm -f "$dirty"' EXIT
 
 # A native one-entry manifest must be selected explicitly and cannot masquerade
 # as a complete five-platform candidate.
@@ -41,6 +41,11 @@ if "$root/scripts/verify-release-manifest.sh" --native "$temp/dist/release-manif
 # Dirty release inputs fail closed unless the clearly test-only override is
 # present; metadata truthfulness is checked by the reproducibility test.
 touch "$dirty"
-if SYMPHONY_RELEASE_OUTPUT="$temp/dirty-dist" "$root/scripts/build-release.sh" >/dev/null 2>&1; then echo "dirty release inputs were accepted without override" >&2; exit 1; fi
+if env -u SYMPHONY_RELEASE_ALLOW_DIRTY_TEST_ONLY \
+  SYMPHONY_RELEASE_OUTPUT="$temp/dirty-dist" \
+  "$root/scripts/build-release.sh" >/dev/null 2>&1; then
+  echo "dirty release inputs were accepted without override" >&2
+  exit 1
+fi
 rm -f "$dirty"
 echo "Release negative fixtures passed"
