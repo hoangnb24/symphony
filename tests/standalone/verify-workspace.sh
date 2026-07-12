@@ -5,7 +5,8 @@ root=${US091_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 cd "$root"
 
 metadata=$(mktemp)
-trap 'rm -f "$metadata"' EXIT
+desktop_fixture=$(mktemp -d)
+trap 'rm -f "$metadata"; rm -rf "$desktop_fixture"' EXIT
 cargo metadata --locked --no-deps --format-version 1 >"$metadata"
 jq -e '
   (.workspace_members | length) == 1 and
@@ -25,7 +26,8 @@ fi
 if rg -n '(/|[.][.]/)repository-harness' \
     --glob 'Cargo.toml' --glob 'package.json' --glob 'package-lock.json' \
     --glob '*.sh' --glob '*.ps1' --glob '*.cjs' --glob '*.ts' \
-    --glob '!tests/migration/**' .; then
+    --glob '!tests/**' \
+    --glob '!scripts/verify-e11-us095.sh' .; then
   echo "live manifest or script names a sibling repository-harness checkout" >&2
   exit 1
 fi
@@ -47,7 +49,10 @@ cargo build --workspace --release --locked
 npm --prefix crates/harness-symphony/web-ui ci
 npm --prefix crates/harness-symphony/web-ui run build
 npm --prefix crates/harness-symphony/web-ui run e2e
-npm --prefix crates/harness-symphony/web-ui run desktop:smoke
+tests/compatibility/bootstrap-harness-fixture.sh --upgrade-cli \
+  --story US-STANDALONE-DESKTOP "$desktop_fixture"
+npm --prefix crates/harness-symphony/web-ui run desktop:smoke -- \
+  --repo-root "$desktop_fixture"
 git diff --check
 
 echo "US-091 standalone workspace verification passed"

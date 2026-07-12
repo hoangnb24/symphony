@@ -49,12 +49,33 @@ jobs:
           node -e 'const m=require("./cargo-metadata.json"); if(m.workspace_members.length!==1 || m.packages.length!==1 || m.packages[0].name!=="harness-symphony") process.exit(1)'
       - name: Run Rust tests
         run: cargo test --workspace --locked
+      - name: Exercise native protocol discovery and execution preflight
+        run: |
+          cargo test -p harness-symphony --locked harness_protocol::tests -- --nocapture
+          cargo test -p harness-symphony --locked agent::tests -- --nocapture
+          cargo test -p harness-symphony --locked doctor::tests -- --nocapture
+      - name: Run fail-before-mutation compatibility fixtures
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          tests/compatibility/test-harness-protocol.sh
+          tests/compatibility/test-agent-preflight.sh
       - name: Install Web UI dependencies
         run: npm --prefix crates/harness-symphony/web-ui ci
       - name: Build Web UI
         run: npm --prefix crates/harness-symphony/web-ui run build
-      - name: Run desktop path smoke
-        run: npm --prefix crates/harness-symphony/web-ui run desktop:smoke
+      - name: Bootstrap native external fixture and run desktop path smoke
+        shell: bash
+        run: |
+          fixture="$RUNNER_TEMP/symphony-desktop-fixture"
+          tests/compatibility/bootstrap-harness-fixture.sh \
+            --upgrade-cli --story US-INDEP-001 "$fixture"
+          fixture_arg="$fixture"
+          if command -v cygpath >/dev/null 2>&1; then
+            fixture_arg=$(cygpath -w "$fixture")
+          fi
+          npm --prefix crates/harness-symphony/web-ui run desktop:smoke -- \
+            --repo-root "$fixture_arg"
 
   browser-e2e:
     name: Playwright end-to-end

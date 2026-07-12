@@ -80,7 +80,13 @@ npm --prefix crates/harness-symphony/web-ui ci
 npm --prefix crates/harness-symphony/web-ui exec -- playwright install chromium
 npm --prefix crates/harness-symphony/web-ui run build
 npm --prefix crates/harness-symphony/web-ui run e2e
-npm --prefix crates/harness-symphony/web-ui run desktop:smoke
+
+FIXTURE=$(mktemp -d)
+tests/compatibility/bootstrap-harness-fixture.sh --upgrade-cli \
+  --story US-DESKTOP-SMOKE "$FIXTURE"
+npm --prefix crates/harness-symphony/web-ui run desktop:smoke -- \
+  --repo-root "$FIXTURE"
+rm -rf "$FIXTURE"
 ```
 
 On Linux CI, Playwright may use `playwright install --with-deps chromium`; that

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "story_id": "US-095",
+  "validation_mode": "reproducible-verifier",
+  "harness_release": "harness-cli-v0.1.14",
+  "forced_upgrade_from": "harness-cli-v0.1.11",
+  "expected_changeset_operations": ["story.update", "story.verify", "story.complete"],
+  "expected_first_sync_operations": 3,
+  "expected_second_sync_operations": 0,
+  "rust_tests": 119,
+  "playwright_tests": 19,
+  "verifier": "scripts/verify-e11-us095.sh",
+  "ephemeral_evidence": "printed by every verifier run and intentionally not tracked"
+}
