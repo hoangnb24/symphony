@@ -1,0 +1,11 @@
+# E11 target-owned contract packets
+# source_repository=git@github.com:hoangnb24/repository-harness.git
+# source_commit=e3980e5acdf520bf75101b9ef4a9fd4da310fc3e
+# Format: SHA256  source_path  target_path
+51098e5ce14a5c9831b4a058f664cd680676454f9e2dc2e5c7471d5e9e5e05a4  docs/stories/epics/E11-symphony-repository-separation/US-093-symphony-harness-protocol-adapter/design.md  docs/stories/epics/E11-symphony-repository-separation/US-093-symphony-harness-protocol-adapter/design.md
+f0a17306f6f0f32296344c34f654aebd64fa3290cd2d7df61591730805ce2d49  docs/stories/epics/E11-symphony-repository-separation/US-093-symphony-harness-protocol-adapter/execplan.md  docs/stories/epics/E11-symphony-repository-separation/US-093-symphony-harness-protocol-adapter/execplan.md
+faf07f32ea91a4adc57db85e26ce33318170c068227197bfacd5143d8ca9e99b  docs/stories/epics/E11-symphony-repository-separation/US-093-symphony-harness-protocol-adapter/overview.md  docs/stories/epics/E11-symphony-repository-separation/US-093-symphony-harness-protocol-adapter/overview.md
+6ab4ad765c07ad475e03d2ea43384b9b01511b5d1c668ec714f4ee9f8641c3f4  docs/stories/epics/E11-symphony-repository-separation/US-093-symphony-harness-protocol-adapter/validation.md  docs/stories/epics/E11-symphony-repository-separation/US-093-symphony-harness-protocol-adapter/validation.md
+a70cc36dc594409237547781ff19bfbba5ff97b9e2586c13e3019187c89c2bc1  docs/stories/epics/E11-symphony-repository-separation/US-094-symphony-product-docs-and-optional-tooling-migration.md  docs/stories/epics/E11-symphony-repository-separation/US-094-symphony-product-docs-and-optional-tooling-migration.md
+860a5e5cf6a056d2c1aac5361661580a6a09a44744588d0b0a25a39ac4e8192b  docs/stories/epics/E11-symphony-repository-separation/US-095-cross-repository-standalone-parity-suite.md  docs/stories/epics/E11-symphony-repository-separation/US-095-cross-repository-standalone-parity-suite.md
+9d9d6a4aa2e369eb4169fbefe1d43f8217c19561d1e68386bde279ab3c173959  docs/stories/epics/E11-symphony-repository-separation/US-096-standalone-symphony-packaging-and-release-candidate.md  docs/stories/epics/E11-symphony-repository-separation/US-096-standalone-symphony-packaging-and-release-candidate.md
