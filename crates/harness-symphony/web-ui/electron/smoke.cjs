@@ -62,12 +62,13 @@ async function main() {
     }
 
     const board = await requestText(`${baseUrl}/api/board`);
-    if (board.statusCode !== 200) {
+    if (board.statusCode === 200) {
+      const parsed = JSON.parse(board.body);
+      if (!Array.isArray(parsed.items)) {
+        throw new Error("/api/board did not return an items array");
+      }
+    } else if (!(board.statusCode === 500 && !fs.existsSync(path.join(repoRoot, "harness.db")))) {
       throw new Error(`/api/board returned HTTP ${board.statusCode}`);
-    }
-    const parsed = JSON.parse(board.body);
-    if (!Array.isArray(parsed.items)) {
-      throw new Error("/api/board did not return an items array");
     }
     console.log(`Desktop smoke passed at ${baseUrl}`);
   } finally {

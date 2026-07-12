@@ -8,11 +8,15 @@ function repoRootFromElectronDir() {
 }
 
 function looksLikeRepoRoot(candidate) {
-  return (
-    candidate &&
-    fs.existsSync(path.join(candidate, "harness.db")) &&
-    fs.existsSync(path.join(candidate, "crates", "harness-symphony"))
+  if (!candidate) {
+    return false;
+  }
+  const hasSymphonySource = fs.existsSync(
+    path.join(candidate, "crates", "harness-symphony", "Cargo.toml")
   );
+  const hasStandaloneWorkspace = fs.existsSync(path.join(candidate, "Cargo.toml"));
+  const hasHarnessDatabase = fs.existsSync(path.join(candidate, "harness.db"));
+  return hasSymphonySource && (hasStandaloneWorkspace || hasHarnessDatabase);
 }
 
 function ancestors(startPath) {

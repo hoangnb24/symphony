@@ -1,0 +1,87 @@
+name: Standalone Symphony
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-quality:
+    name: Rust formatting and Clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run Clippy for every target
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  standalone-platform:
+    name: Standalone paths (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/harness-symphony/web-ui/package-lock.json
+      - name: Verify Cargo metadata
+        shell: bash
+        run: |
+          cargo metadata --locked --no-deps --format-version 1 > cargo-metadata.json
+          node -e 'const m=require("./cargo-metadata.json"); if(m.workspace_members.length!==1 || m.packages.length!==1 || m.packages[0].name!=="harness-symphony") process.exit(1)'
+      - name: Run Rust tests
+        run: cargo test --workspace --locked
+      - name: Install Web UI dependencies
+        run: npm --prefix crates/harness-symphony/web-ui ci
+      - name: Build Web UI
+        run: npm --prefix crates/harness-symphony/web-ui run build
+      - name: Run desktop path smoke
+        run: npm --prefix crates/harness-symphony/web-ui run desktop:smoke
+
+  browser-e2e:
+    name: Playwright end-to-end
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/harness-symphony/web-ui/package-lock.json
+      - name: Install Web UI dependencies
+        run: npm --prefix crates/harness-symphony/web-ui ci
+      - name: Install Chromium and system dependencies
+        run: npm --prefix crates/harness-symphony/web-ui exec -- playwright install --with-deps chromium
+      - name: Run Playwright tests
+        run: npm --prefix crates/harness-symphony/web-ui run e2e
+
+  release-build:
+    name: Locked release build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Build release binary
+        run: cargo build --workspace --release --locked

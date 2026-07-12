@@ -41,6 +41,18 @@ async function expectReadableTaskCard(locator: Locator, label: string) {
 }
 
 test("board renders task columns and detail controls", async ({ page }) => {
+  const item = {
+    ...boardItem("US-052", "Sync Approval And Done Transition", "Ready"),
+    blockers: ["US-051"],
+    unblocks: ["US-053"],
+    parent_id: "US-050"
+  };
+  await page.route("**/api/board", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ items: [item] })
+    });
+  });
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Symphony work board" })).toBeVisible();
@@ -54,8 +66,9 @@ test("board renders task columns and detail controls", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Done", exact: true })).toBeVisible();
 
   await page.getByRole("textbox", { name: "Find task" }).fill("US-052");
-  await expect(page.getByRole("button", { name: /US-052/ })).toBeVisible();
-  await page.getByRole("button", { name: /US-052/ }).click();
+  const taskCard = page.getByTestId("task-card").filter({ hasText: "US-052" });
+  await expect(taskCard).toBeVisible();
+  await taskCard.click();
 
   const detail = page.getByRole("dialog", { name: "Selected work detail" });
   await expect(page.getByTestId("task-detail-overlay")).toHaveCSS("position", "fixed");

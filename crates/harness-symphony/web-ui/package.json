@@ -1,5 +1,5 @@
 {
-  "name": "@repository-harness/symphony-web-ui",
+  "name": "symphony-web-ui",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -37,7 +37,7 @@
     "vite": "^6.0.3"
   },
   "build": {
-    "appId": "dev.repository-harness.symphony",
+    "appId": "dev.hoangnb24.symphony",
     "productName": "Harness Symphony",
     "asar": true,
     "directories": {
