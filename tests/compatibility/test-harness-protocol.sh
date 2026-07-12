@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cli=${HARNESS_CLI_PATH:-"$repo_root/scripts/bin/harness-cli"}
+unset HARNESS_CLI_PATH
 binary="$repo_root/target/debug/harness-symphony"
 temp=$(mktemp -d)
 trap 'rm -rf "$temp"' EXIT
