@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -21,6 +21,8 @@ const CODEX_IDLE_RECONCILE_SECONDS: u64 = 1;
 pub enum AgentError {
     #[error("agent.command is not configured. Set agent.command in .harness/symphony.yml.")]
     MissingCommand,
+    #[error("selected agent executable '{0}' is not available; install it or configure agent.command before launching a run")]
+    UnavailableCommand(String),
     #[error("unsupported agent adapter '{0}'. Supported adapters: custom, codex")]
     UnsupportedAdapter(String),
     #[error("agent command failed with status {status}: {stderr}")]
@@ -57,18 +59,92 @@ pub fn agent_adapter_status(config: &ResolvedConfig) -> Result<String, AgentErro
     match config.agent_adapter.as_str() {
         "custom" => {
             let command = resolved_agent_command(config);
-            if command.is_empty() {
-                Err(AgentError::MissingCommand)
-            } else {
-                Ok(format!("custom command: {}", command.join(" ")))
-            }
+            validate_agent_command(config, &command)?;
+            Ok(format!("custom command: {}", command.join(" ")))
         }
-        "codex" => Ok(format!(
-            "codex app-server command: {}; runtime: uncapped",
-            resolved_agent_command(config).join(" ")
-        )),
+        "codex" => {
+            let command = resolved_agent_command(config);
+            validate_agent_command(config, &command)?;
+            Ok(format!(
+                "codex app-server command: {}; runtime: uncapped",
+                command.join(" ")
+            ))
+        }
         other => Err(AgentError::UnsupportedAdapter(other.to_owned())),
     }
+}
+
+/// Validate the selected execution adapter before run preparation creates a
+/// branch, worktree, snapshot, or local state row. Prepare-only deliberately
+/// does not call this function because it does not launch an agent.
+pub fn preflight_agent(config: &ResolvedConfig) -> Result<(), AgentError> {
+    agent_adapter_status(config).map(|_| ())
+}
+
+fn validate_agent_command(config: &ResolvedConfig, command: &[String]) -> Result<(), AgentError> {
+    let Some(executable) = command.first() else {
+        return Err(AgentError::MissingCommand);
+    };
+    if executable_available(executable, &config.repo_root) {
+        Ok(())
+    } else {
+        Err(AgentError::UnavailableCommand(executable.clone()))
+    }
+}
+
+fn executable_available(executable: &str, repo_root: &Path) -> bool {
+    let path = Path::new(executable);
+    if path.is_absolute() {
+        return is_executable_file(path);
+    }
+    if path.components().count() > 1 {
+        return is_executable_file(&repo_root.join(path));
+    }
+    let Some(search_path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    executable_candidates(executable).iter().any(|name| {
+        std::env::split_paths(&search_path)
+            .any(|directory| is_executable_file(&directory.join(name)))
+    })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(windows)]
+    {
+        true
+    }
+}
+
+fn executable_candidates(executable: &str) -> Vec<PathBuf> {
+    #[cfg(not(windows))]
+    let candidates = vec![PathBuf::from(executable)];
+    #[cfg(windows)]
+    let mut candidates = vec![PathBuf::from(executable)];
+    #[cfg(windows)]
+    if Path::new(executable).extension().is_none() {
+        let extensions = std::env::var_os("PATHEXT")
+            .and_then(|value| value.into_string().ok())
+            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_owned());
+        candidates.extend(
+            extensions
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| PathBuf::from(format!("{executable}{extension}"))),
+        );
+    }
+    candidates
 }
 
 fn run_custom_agent(config: &ResolvedConfig, prepared: &PreparedRun) -> Result<(), AgentError> {
@@ -527,6 +603,13 @@ printf '%s\n' '{"protocol_version":1,"operation":"query.contract","request_id":n
             resolved_agent_command(&config),
             vec!["codex".to_owned(), "app-server".to_owned()]
         );
+    }
+
+    #[test]
+    fn available_codex_adapter_reports_selected_command() {
+        let executable = std::env::current_exe().unwrap().display().to_string();
+        let config = config("codex", vec![&executable]);
+
         assert!(agent_adapter_status(&config)
             .unwrap()
             .contains("codex app-server"));
@@ -539,6 +622,32 @@ printf '%s\n' '{"protocol_version":1,"operation":"query.contract","request_id":n
         assert!(matches!(
             agent_adapter_status(&config).unwrap_err(),
             AgentError::MissingCommand
+        ));
+    }
+
+    #[test]
+    fn selected_missing_agent_executable_fails_preflight() {
+        let config = config("custom", vec!["symphony-agent-that-does-not-exist"]);
+
+        assert!(matches!(
+            preflight_agent(&config).unwrap_err(),
+            AgentError::UnavailableCommand(command)
+                if command == "symphony-agent-that-does-not-exist"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_non_executable_agent_file_fails_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("not-executable-agent");
+        fs::write(&path, "fixture").unwrap();
+        let executable = path.display().to_string();
+        let config = config("custom", vec![&executable]);
+
+        assert!(matches!(
+            preflight_agent(&config).unwrap_err(),
+            AgentError::UnavailableCommand(command) if command == executable
         ));
     }
 

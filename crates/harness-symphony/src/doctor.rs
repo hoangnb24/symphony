@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use serde::Deserialize;
 use thiserror::Error;
 
 use crate::agent::{agent_adapter_status, AgentError};
@@ -68,8 +69,99 @@ pub fn run_doctor(config: &ResolvedConfig) -> Result<DoctorReport, DoctorError> 
     ];
     if protocol_ready {
         checks.insert(5, check_unapplied_changesets(config));
+        checks.insert(6, check_optional_providers(config));
     }
     Ok(DoctorReport { checks })
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolProvider {
+    provider: String,
+    name: String,
+    source: String,
+    capability: Option<String>,
+    status: String,
+}
+
+fn check_optional_providers(config: &ResolvedConfig) -> DoctorCheck {
+    let protocol = match HarnessProtocol::from_config(config) {
+        Ok(protocol) => protocol,
+        Err(error) => return optional_provider_warning(error.to_string()),
+    };
+    let output = Command::new(protocol.executable())
+        .args(["query", "tools", "--summary", "--json"])
+        .current_dir(&config.repo_root)
+        .env("HARNESS_REPO_ROOT", &config.repo_root)
+        .env("HARNESS_DB_PATH", &config.harness_db)
+        .output();
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            return optional_provider_warning(format!(
+                "tool discovery exited {}; optional proof is degraded",
+                output.status
+            ))
+        }
+        Err(error) => return optional_provider_warning(error.to_string()),
+    };
+    let tools: Vec<ToolProvider> = match serde_json::from_slice(&output.stdout) {
+        Ok(tools) => tools,
+        Err(error) => return optional_provider_warning(format!("invalid tool summary: {error}")),
+    };
+    classify_optional_providers(&tools)
+}
+
+fn classify_optional_providers(tools: &[ToolProvider]) -> DoctorCheck {
+    let registered = tools
+        .iter()
+        .filter(|tool| tool.source != "compiled" && tool.capability.is_some())
+        .collect::<Vec<_>>();
+    if registered.is_empty() {
+        return DoctorCheck {
+            name: "optional providers",
+            status: CheckStatus::Pass,
+            detail: "no optional providers are registered; clean skip".to_owned(),
+            next: None,
+        };
+    }
+    let weak = registered
+        .iter()
+        .filter(|tool| tool.status != "present")
+        .map(|tool| format!("{}:{} ({})", tool.provider, tool.name, tool.status))
+        .collect::<Vec<_>>();
+    if weak.is_empty() {
+        DoctorCheck {
+            name: "optional providers",
+            status: CheckStatus::Pass,
+            detail: format!(
+                "{} registered optional provider(s) present",
+                registered.len()
+            ),
+            next: None,
+        }
+    } else {
+        DoctorCheck {
+            name: "optional providers",
+            status: CheckStatus::Warn,
+            detail: format!(
+                "weak/degraded optional proof: {}; core orchestration remains available",
+                weak.join(", ")
+            ),
+            next: Some("Install or rescan the provider to strengthen optional proof.".to_owned()),
+        }
+    }
+}
+
+fn optional_provider_warning(detail: String) -> DoctorCheck {
+    DoctorCheck {
+        name: "optional providers",
+        status: CheckStatus::Warn,
+        detail: format!("optional provider discovery unavailable: {detail}"),
+        next: Some(
+            "Core orchestration is unaffected; repair tool discovery for optional proof."
+                .to_owned(),
+        ),
+    }
 }
 
 fn check_harness_protocol(config: &ResolvedConfig) -> DoctorCheck {
@@ -416,10 +508,49 @@ mod tests {
     fn codex_agent_adapter_passes_without_explicit_command() {
         let mut config = base_config();
         config.agent_adapter = "codex".to_owned();
+        config.agent_command = vec![std::env::current_exe().unwrap().display().to_string()];
         let check = check_agent_adapter(&config);
 
         assert_eq!(check.status, CheckStatus::Pass);
         assert!(check.detail.contains("codex app-server"));
+    }
+
+    fn optional_tool(status: &str) -> ToolProvider {
+        ToolProvider {
+            provider: "fixture-provider".to_owned(),
+            name: "fixture-check".to_owned(),
+            source: "registered".to_owned(),
+            capability: Some("fixture-proof".to_owned()),
+            status: status.to_owned(),
+        }
+    }
+
+    #[test]
+    fn absent_unregistered_optional_provider_clean_skips() {
+        let check = classify_optional_providers(&[]);
+
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert!(check.detail.contains("clean skip"));
+    }
+
+    #[test]
+    fn registered_missing_optional_provider_is_degraded_not_failed() {
+        let check = classify_optional_providers(&[optional_tool("missing")]);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.detail.contains("weak/degraded optional proof"));
+        assert!(!DoctorReport {
+            checks: vec![check]
+        }
+        .has_failures());
+    }
+
+    #[test]
+    fn registered_present_optional_provider_passes() {
+        let check = classify_optional_providers(&[optional_tool("present")]);
+
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert!(check.detail.contains("provider(s) present"));
     }
 
     #[test]

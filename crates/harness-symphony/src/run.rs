@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
-use crate::agent::{run_agent, AgentError};
+use crate::agent::{preflight_agent, run_agent, AgentError};
 use crate::changeset::{append_rendered_section, ChangesetError};
 use crate::config::ResolvedConfig;
 use crate::harness_protocol::{HarnessProtocol, HarnessProtocolError, Story as HarnessStory};
@@ -257,10 +257,12 @@ pub fn prepare_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Prepa
 }
 
 pub fn execute_run(config: &ResolvedConfig, story_id: &str) -> Result<CompletedRun, RunError> {
+    preflight_agent(config)?;
     execute_prepared_run(config, prepare_run(config, story_id)?)
 }
 
 pub fn execute_here_run(config: &ResolvedConfig, story_id: &str) -> Result<CompletedRun, RunError> {
+    preflight_agent(config)?;
     execute_prepared_run(config, prepare_here_run(config, story_id)?)
 }
 
