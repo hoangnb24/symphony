@@ -29,9 +29,10 @@ pub const SUPPORTED_DATABASE_SCHEMA_MAXIMUM: u32 = CONTRACT_SCHEMA_MAXIMUM;
 pub const OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MUTATION_TIMEOUT: Duration = Duration::from_secs(300);
-/// Explicitly tested immutable Harness releases. Do not replace this with a
-/// semantic-version comparison: protocol capabilities are behavioral promises.
-pub const SUPPORTED_CLI_VERSIONS: &[&str] = &["0.1.14"];
+/// Immutable Harness releases exercised by the release compatibility suite.
+/// Runtime acceptance is based on the protocol/schema/capability contract,
+/// never semantic-version ordering or membership in this reporting list.
+pub const SUPPORTED_CLI_VERSIONS: &[&str] = &["0.1.14", "0.1.15"];
 
 pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "stories.read.v1",
@@ -214,8 +215,6 @@ pub enum HarnessProtocolError {
     ResultMismatch { operation: String, reason: String },
     #[error("unsupported Harness protocol {actual}, expected {expected}; install the pinned compatible Harness release")]
     ProtocolVersion { expected: u32, actual: u32 },
-    #[error("Harness CLI {actual} is not in the tested support set; install harness-cli-v0.1.14 or add an explicitly verified release")]
-    UnsupportedCliVersion { actual: String },
     #[error("Harness CLI schema contract {actual_minimum}..={actual_maximum} does not match the tested 1..=13 tuple; install harness-cli-v0.1.14")]
     SchemaContractRange {
         actual_minimum: u32,
@@ -518,11 +517,6 @@ pub fn validate_contract(
             actual: contract.protocol_version,
         });
     }
-    if !SUPPORTED_CLI_VERSIONS.contains(&contract.cli_version.as_str()) {
-        return Err(HarnessProtocolError::UnsupportedCliVersion {
-            actual: contract.cli_version.clone(),
-        });
-    }
     if contract.schema_minimum != CONTRACT_SCHEMA_MINIMUM
         || contract.schema_maximum != CONTRACT_SCHEMA_MAXIMUM
     {
@@ -803,15 +797,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_cli_and_inconsistent_current_schema_fail_closed() {
+    fn version_label_is_informational_but_inconsistent_current_schema_fails_closed() {
         let mut value = contract();
-        value.cli_version = "0.1.11".to_owned();
-        assert!(matches!(
-            validate_contract(&value, Path::new("harness.db"), &[]),
-            Err(HarnessProtocolError::UnsupportedCliVersion { actual }) if actual == "0.1.11"
-        ));
-
-        value.cli_version = "0.1.14".to_owned();
+        value.cli_version = "99.0.0-contract-compatible".to_owned();
+        validate_contract(&value, Path::new("harness.db"), REQUIRED_CAPABILITIES).unwrap();
         value.database_schema_version = None;
         assert!(matches!(
             validate_contract(&value, Path::new("harness.db"), &[]),

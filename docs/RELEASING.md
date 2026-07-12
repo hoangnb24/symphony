@@ -1,7 +1,9 @@
 # Building a Symphony Release Candidate
 
-US-096 creates local and CI artifacts only. It does not publish a GitHub
-Release.
+The five-platform workflow creates immutable candidates. Publishing a GitHub
+release or tag remains a separate explicit owner-approved cutover action. The
+published `symphony-v0.1.0` release is the initial baseline; later releases
+must repeat the complete native and aggregate gates.
 
 Prerequisites are the pinned Rust and Node versions, `npm ci`, and common Unix
 archive tools. From the repository root:

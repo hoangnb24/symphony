@@ -34,23 +34,23 @@ jobs:
           - label: linux-x64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            archive: harness-symphony-0.1.0-linux-x64.tar.gz
+            archive: harness-symphony-0.1.1-linux-x64.tar.gz
           - label: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            archive: harness-symphony-0.1.0-linux-arm64.tar.gz
+            archive: harness-symphony-0.1.1-linux-arm64.tar.gz
           - label: macos-arm64
             runner: macos-14
             target: aarch64-apple-darwin
-            archive: harness-symphony-0.1.0-macos-arm64.tar.gz
+            archive: harness-symphony-0.1.1-macos-arm64.tar.gz
           - label: macos-x64
             runner: macos-15-intel
             target: x86_64-apple-darwin
-            archive: harness-symphony-0.1.0-macos-x64.tar.gz
+            archive: harness-symphony-0.1.1-macos-x64.tar.gz
           - label: windows-x64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
-            archive: harness-symphony-0.1.0-windows-x64.tar.gz
+            archive: harness-symphony-0.1.1-windows-x64.tar.gz
     steps:
       - name: Check out the immutable candidate source
         uses: actions/checkout@v4
@@ -149,7 +149,7 @@ jobs:
             .source_sha == $sha and
             .manifest_version == 1 and
             .product == "harness-symphony" and
-            .symphony_version == "0.1.0" and
+            .symphony_version == "0.1.1" and
             .supported_harness.protocol_version == 1 and
             .supported_harness.schema_minimum == 1 and
             .supported_harness.schema_maximum == 13 and
@@ -180,7 +180,7 @@ jobs:
             $report.harness_schema_maximum == .supported_harness.schema_maximum and
             $report.current_harness_schema_minimum == .supported_harness.current_schema_minimum and
             $report.current_harness_schema_maximum == .supported_harness.current_schema_maximum and
-            $report.supported_harness_cli_versions == ["0.1.14"]
+            $report.supported_harness_cli_versions == ["0.1.14","0.1.15"]
           ' "dist/${{ matrix.label }}.release-manifest.json" >/dev/null
       - name: Compare packaged Windows binary version to manifest
         if: runner.os == 'Windows'
@@ -198,7 +198,7 @@ jobs:
               $report.harness_schema_maximum -ne $supported.schema_maximum -or
               $report.current_harness_schema_minimum -ne $supported.current_schema_minimum -or
               $report.current_harness_schema_maximum -ne $supported.current_schema_maximum -or
-              ($report.supported_harness_cli_versions -join ',') -ne '0.1.14') {
+              ($report.supported_harness_cli_versions -join ',') -ne '0.1.14,0.1.15') {
             throw 'packaged Windows binary version tuple differs from native release manifest'
           }
       - name: Smoke unpacked Unix archive
@@ -257,16 +257,16 @@ jobs:
             find "$component" -maxdepth 1 -type f -exec cp {} dist/ \;
           done
           expected_files=$(cat <<'EOF'
-          harness-symphony-0.1.0-linux-arm64.tar.gz
-          harness-symphony-0.1.0-linux-arm64.tar.gz.sha256
-          harness-symphony-0.1.0-linux-x64.tar.gz
-          harness-symphony-0.1.0-linux-x64.tar.gz.sha256
-          harness-symphony-0.1.0-macos-arm64.tar.gz
-          harness-symphony-0.1.0-macos-arm64.tar.gz.sha256
-          harness-symphony-0.1.0-macos-x64.tar.gz
-          harness-symphony-0.1.0-macos-x64.tar.gz.sha256
-          harness-symphony-0.1.0-windows-x64.tar.gz
-          harness-symphony-0.1.0-windows-x64.tar.gz.sha256
+          harness-symphony-0.1.1-linux-arm64.tar.gz
+          harness-symphony-0.1.1-linux-arm64.tar.gz.sha256
+          harness-symphony-0.1.1-linux-x64.tar.gz
+          harness-symphony-0.1.1-linux-x64.tar.gz.sha256
+          harness-symphony-0.1.1-macos-arm64.tar.gz
+          harness-symphony-0.1.1-macos-arm64.tar.gz.sha256
+          harness-symphony-0.1.1-macos-x64.tar.gz
+          harness-symphony-0.1.1-macos-x64.tar.gz.sha256
+          harness-symphony-0.1.1-windows-x64.tar.gz
+          harness-symphony-0.1.1-windows-x64.tar.gz.sha256
           linux-arm64.release-manifest.json
           linux-x64.release-manifest.json
           macos-arm64.release-manifest.json

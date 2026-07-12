@@ -15,9 +15,12 @@ database. The typed boundary is documented in
 An operator runs a built Symphony executable against the repository that owns
 the stories. The repository can be different from the current directory.
 
-US-096 produces local/CI release candidates; it does not publish them remotely.
-Obtain the archive and its `.sha256` file from the local `dist/` output or an
-authorized CI artifact, then verify and install it without Cargo.
+The canonical standalone release is published from this repository. Version
+`symphony-v0.1.0` established the five-platform artifact baseline; later
+releases retain protocol-v1 compatibility based on the discovered contract
+tuple rather than Harness patch-version ordering. Obtain an archive and its
+`.sha256` sidecar from an approved GitHub release, then verify and install it
+without Cargo.
 Runtime checks the packaged resource manifest's paths and shape; the release
 verifier is the proof that its Web tree hash matches the packaged bytes.
 
