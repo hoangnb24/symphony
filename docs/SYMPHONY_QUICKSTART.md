@@ -19,7 +19,7 @@ into this:
 
 ```text
 isolated run workspace
-  + copied harness.db
+  + WAL-safe harness.db snapshot
   + RUN_CONTRACT.json
   + agent execution
   + SUMMARY.md
@@ -28,8 +28,9 @@ isolated run workspace
 ```
 
 The important rule: the root `harness.db` is not the source of truth for a run.
-The run writes to a copied database, and durable Harness changes are preserved
-as semantic changesets.
+The run writes to a protocol-created snapshot, and durable Harness changes are
+preserved as semantic changesets. See
+`docs/contracts/harness-runtime-v1.md` for the pinned CLI contract.
 
 ## Visual Map
 
@@ -45,7 +46,7 @@ Use this as the quick mental picture:
 | Normal / high-risk run                                      |
 |                                                             |
 |  .symphony/worktrees/<run_id>/                              |
-|    +- harness.db                copied DB for this run       |
+|    +- harness.db                online-backup snapshot       |
 |    +- AGENTS.md                 Symphony shim for the agent  |
 |    +- .harness/runs/<run_id>/RUN_CONTRACT.json              |
 +-------+-----------------------------------------------------+
@@ -75,7 +76,7 @@ Tiny stories take a shorter path:
         v
 +-------------------------------------------------------------+
 | current checkout                                            |
-|   + copied DB under .symphony/runs/                         |
+|   + WAL-safe DB snapshot under .symphony/runs/              |
 |   + SUMMARY.md, RESULT.json, and changeset still required   |
 +-------------------------------------------------------------+
 ```
@@ -112,14 +113,14 @@ flowchart LR
 
     subgraph Run[Symphony run workspace]
         W[.symphony/worktrees/run_id]
-        CDB[(copied harness.db)]
+        CDB[(WAL-safe harness.db snapshot)]
         CONTRACT[RUN_CONTRACT.json]
         AGENTS[AGENTS.md shim]
         OUT[SUMMARY.md + RESULT.json]
         CHANGESET[changeset JSONL]
     end
 
-    RDB -. copied, not mutated .-> CDB
+    RDB -. protocol snapshot, not mutated .-> CDB
     RCODE --> W
     W --> CONTRACT
     W --> AGENTS
@@ -312,6 +313,16 @@ agent:
   adapter: codex
 ```
 
+Symphony resolves Harness CLI from `repo.harness_cli`, then
+`HARNESS_CLI_PATH`, the repository-local platform binary, and finally `PATH`.
+Pin an explicit executable when the repository-local path is not appropriate:
+
+```yaml
+version: 1
+repo:
+  harness_cli: tools/harness-cli
+```
+
 For a custom one-shot command adapter:
 
 ```yaml
@@ -346,6 +357,7 @@ target/debug/harness-symphony config show
 
 - Do not send normal or high-risk stories through `--here`.
 - Do not edit root `harness.db` to represent run results.
+- Do not copy `harness.db`, `-wal`, or `-shm`; use the protocol snapshot.
 - Do not commit `.symphony/`; it is local runtime state.
 - Do not review only raw changeset JSONL; read `SUMMARY.md` first.
 - Do not forget `sync` after merging a Symphony PR.

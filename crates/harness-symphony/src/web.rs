@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::changeset::{render_changeset, render_markdown, ChangesetError};
 use crate::config::ResolvedConfig;
+use crate::harness_protocol::{HarnessProtocol, HarnessProtocolError};
 use crate::pr::{create_pr, PrError};
 use crate::run::{execute_prepared_run, prepare_run, PreparedRun, RunError};
 use crate::state::{RunStateStore, StateError};
@@ -203,6 +204,7 @@ struct SyncChangeResponse {
 }
 
 pub fn run_web_server(config: &ResolvedConfig, options: WebServerOptions) -> Result<(), WebError> {
+    compatible_protocol(config)?;
     let listener = TcpListener::bind(format!("{}:{}", options.host, options.port))?;
     let address = listener.local_addr()?;
     println!("Symphony Web UI Controller listening at http://{address}");
@@ -237,7 +239,8 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse
     match (method.as_deref(), path.as_deref()) {
         (Some("GET"), Some("/health")) => json_response(200, &serde_json::json!({"ok": true})),
         (Some("GET"), Some("/api/board")) => {
-            let items = list_board(&config.harness_db, &config.state_db)?;
+            let protocol = compatible_protocol(config)?;
+            let items = list_board(&protocol, &config.state_db)?;
             let items = items
                 .into_iter()
                 .map(|item| BoardItemResponse::from_item(config, item))
@@ -313,7 +316,8 @@ fn retire_task_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpR
     if let Some(response) = migration_fence_conflict(config)? {
         return Ok(response);
     }
-    let item = match list_board(&config.harness_db, &config.state_db)?
+    let protocol = compatible_protocol(config)?;
+    let item = match list_board(&protocol, &config.state_db)?
         .into_iter()
         .find(|item| item.id == story_id)
     {
@@ -335,7 +339,7 @@ fn retire_task_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpR
             },
         );
     }
-    retire_story(&config.harness_db, story_id)?;
+    retire_story(&protocol, story_id)?;
     json_response(
         200,
         &RetireTaskResponse {
@@ -349,7 +353,8 @@ fn recover_run_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpR
     if let Some(response) = migration_fence_conflict(config)? {
         return Ok(response);
     }
-    let item = match list_board(&config.harness_db, &config.state_db)?
+    let protocol = compatible_protocol(config)?;
+    let item = match list_board(&protocol, &config.state_db)?
         .into_iter()
         .find(|item| item.id == story_id)
     {
@@ -615,6 +620,12 @@ fn migration_fence_conflict(config: &ResolvedConfig) -> Result<Option<HttpRespon
         .map(Some),
         Err(error) => Err(error.into()),
     }
+}
+
+fn compatible_protocol(config: &ResolvedConfig) -> Result<HarnessProtocol, WebError> {
+    let protocol = HarnessProtocol::from_config(config).map_err(WorkError::from)?;
+    protocol.preflight().map_err(WorkError::from)?;
+    Ok(protocol)
 }
 
 fn spawn_run(config: ResolvedConfig, prepared: PreparedRun) {
@@ -1006,11 +1017,14 @@ fn recovery_action_for_review(
     config: &ResolvedConfig,
     run: &crate::state::RunRecord,
 ) -> Result<Option<RecoveryAction>, WebError> {
-    let items = match list_board(&config.harness_db, &config.state_db) {
-        Ok(items) => items,
-        Err(WorkError::MissingDatabase(_)) => return Ok(None),
-        Err(error) => return Err(error.into()),
+    let protocol = match compatible_protocol(config) {
+        Ok(protocol) => protocol,
+        Err(WebError::Work(WorkError::Protocol(HarnessProtocolError::DatabaseMissing {
+            ..
+        }))) => return Ok(None),
+        Err(error) => return Err(error),
     };
+    let items = list_board(&protocol, &config.state_db)?;
     let item = items.into_iter().find(|item| item.id == run.story_id);
     let Some(item) = item else {
         return Ok(None);
@@ -1447,7 +1461,49 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn test_config(temp_dir: &tempfile::TempDir) -> ResolvedConfig {
-        SymphonyConfig::default().resolve(temp_dir.path())
+        let cli = temp_dir.path().join("fake-harness-cli");
+        fs::write(&cli, r#"#!/bin/sh
+set -eu
+case "$1 $2 ${3:-}" in
+  "query contract --json")
+    printf '%s\n' '{"protocol_version":1,"operation":"query.contract","request_id":null,"result":{"protocol_version":1,"cli_version":"0.1.14","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]},"error":null}'
+    ;;
+  "query work-graph --json")
+    if sqlite3 "$HARNESS_DB_PATH" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='story'" | grep -q 1; then
+      stories=$(sqlite3 -json "$HARNESS_DB_PATH" "SELECT id,title,risk_lane,NULL AS contract_doc,status,verify_command,(status='planned' AND verify_command IS NOT NULL) AS runnable FROM story ORDER BY id" | sed 's/\"runnable\":1/\"runnable\":true/g;s/\"runnable\":0/\"runnable\":false/g')
+    else
+      stories='[]'
+    fi
+    printf '%s\n' "{\"protocol_version\":1,\"operation\":\"query.work-graph\",\"request_id\":null,\"result\":{\"stories\":$stories,\"dependencies\":[],\"hierarchy\":[],\"revision\":\"fixture\"},\"error\":null}"
+    ;;
+  "story update --id")
+    id=$4; status=$6; expected=$8
+    before=$(sqlite3 "$HARNESS_DB_PATH" "SELECT status FROM story WHERE id='$id'")
+    sqlite3 "$HARNESS_DB_PATH" "UPDATE story SET status='$status' WHERE id='$id' AND status='$expected'"
+    printf '%s\n' "{\"protocol_version\":1,\"operation\":\"story.update\",\"request_id\":null,\"result\":{\"id\":\"$id\",\"before_status\":\"$before\",\"after_status\":\"$status\",\"runnable_before\":true},\"error\":null}"
+    ;;
+  "db changeset status")
+    id=$(basename "$4" .changeset.jsonl)
+    applied=false; [ -f ".applied-$id" ] && applied=true
+    printf '%s\n' "{\"protocol_version\":1,\"operation\":\"db.changeset.status\",\"request_id\":null,\"result\":{\"id\":\"$id\",\"content_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"applied\":$applied,\"operation_count\":2},\"error\":null}"
+    ;;
+  "db changeset apply")
+    id=$(basename "$4" .changeset.jsonl)
+    : > ".applied-$id"
+    printf '%s\n' "$@" >> sync-args.log
+    printf '%s\n' "{\"protocol_version\":1,\"operation\":\"db.changeset.apply\",\"request_id\":null,\"result\":{\"id\":\"$id\",\"content_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"applied\":true,\"operations\":2},\"error\":null}"
+    ;;
+  "db snapshot --output")
+    cp "$HARNESS_DB_PATH" "$4"
+    printf '%s\n' "{\"protocol_version\":1,\"operation\":\"db.snapshot\",\"request_id\":null,\"result\":{\"output\":\"$4\",\"source_logical_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"graph_revision\":\"fixture\",\"snapshot_file_sha256\":\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"},\"error\":null}"
+    ;;
+  *) exit 64 ;;
+esac
+"#).unwrap();
+        make_executable(&cli);
+        let mut config = SymphonyConfig::default().resolve(temp_dir.path());
+        config.harness_cli = Some(cli);
+        config
     }
 
     fn seed_story(db_path: &std::path::Path) {
@@ -1701,7 +1757,7 @@ mod tests {
         .unwrap();
 
         assert!(start.starts_with("HTTP/1.1 400 Bad Request"));
-        assert!(start.contains("status is changed"));
+        assert!(start.contains("status changed"));
         assert!(retire.starts_with("HTTP/1.1 409 Conflict"));
         assert!(retire.contains("only Ready stories can be retired"));
     }

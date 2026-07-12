@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::config::ResolvedConfig;
+use crate::harness_protocol::{resolve_executable, HarnessProtocolError};
 use crate::run::PreparedRun;
 
 #[cfg(not(test))]
@@ -30,6 +31,8 @@ pub enum AgentError {
     Io(#[from] std::io::Error),
     #[error("agent json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Protocol(#[from] HarnessProtocolError),
 }
 
 pub fn run_agent(config: &ResolvedConfig, prepared: &PreparedRun) -> Result<(), AgentError> {
@@ -330,6 +333,7 @@ fn base_command(command: &[String], prepared: &PreparedRun) -> Command {
     process
         .args(&command[1..])
         .current_dir(&prepared.worktree)
+        .env("HARNESS_REPO_ROOT", &prepared.worktree)
         .env("HARNESS_DB_PATH", &prepared.harness_db_path)
         .env("HARNESS_RUN_ID", &prepared.run_id)
         .env("HARNESS_RUN_MODE", "execute");
@@ -371,7 +375,7 @@ fn send_turn_start(
                 "input": [
                     {
                         "type": "text",
-                        "text": codex_prompt(config, prepared),
+                        "text": codex_prompt(config, prepared)?,
                         "text_elements": []
                     }
                 ]
@@ -420,21 +424,25 @@ fn turn_error_from_query<'a>(message: &'a Value, turn_id: &str) -> Option<&'a st
         .and_then(Value::as_str)
 }
 
-fn codex_prompt(config: &ResolvedConfig, prepared: &PreparedRun) -> String {
-    let harness_cli = config.repo_root.join("scripts/bin/harness-cli");
-    format!(
-        "You are running inside a Harness Symphony worktree. Read AGENTS.md and the run contract at {}. Complete only story {} for run {}. Do not change unrelated product code. Write all required artifacts under the current working directory: .harness/runs/{}/SUMMARY.md and .harness/runs/{}/RESULT.json. Use Harness CLI writes with HARNESS_DB_PATH, HARNESS_RUN_ID, and HARNESS_RUN_MODE from the environment so .harness/changesets/{}.changeset.jsonl is produced in this worktree. If scripts/bin/harness-cli is absent in the worktree, run the root binary at {} while keeping the current worktree as cwd. RESULT.json must have version 1, run_id {}, story_id {}, an allowed outcome, summary_path .harness/runs/{}/SUMMARY.md, and a top-level validation object. Do not write validation_evidence. validation must be either {{\"commands\":[{{\"command\":\"exact command\",\"result\":\"pass\"}}]}} with each result set to pass, fail, or unavailable, or {{\"unavailable\":\"non-empty reason\"}}.",
+fn codex_prompt(config: &ResolvedConfig, prepared: &PreparedRun) -> Result<String, AgentError> {
+    let executable = resolve_executable(config.harness_cli.as_deref(), &config.repo_root)?;
+    let harness_command = serde_json::to_string(&json!({
+        "executable": executable,
+        "argv": Vec::<String>::new(),
+    }))?;
+    Ok(format!(
+        "You are running inside a Harness Symphony worktree. Read AGENTS.md and the run contract at {}. Complete only story {} for run {}. Do not change unrelated product code. Write all required artifacts under the current working directory: .harness/runs/{}/SUMMARY.md and .harness/runs/{}/RESULT.json. Use the structured Harness CLI command {} by executing its executable directly and appending each required CLI argument to argv; never shell-split or substitute a fixed repository path. Keep the current worktree as cwd and use HARNESS_DB_PATH, HARNESS_RUN_ID, and HARNESS_RUN_MODE from the environment so .harness/changesets/{}.changeset.jsonl is produced in this worktree. RESULT.json must have version 1, run_id {}, story_id {}, an allowed outcome, summary_path .harness/runs/{}/SUMMARY.md, and a top-level validation object. Do not write validation_evidence. validation must be either {{\"commands\":[{{\"command\":\"exact command\",\"result\":\"pass\"}}]}} with each result set to pass, fail, or unavailable, or {{\"unavailable\":\"non-empty reason\"}}.",
         prepared.contract_path.display(),
         prepared.story_id,
         prepared.run_id,
         prepared.run_id,
         prepared.run_id,
+        harness_command,
         prepared.run_id,
-        harness_cli.display(),
         prepared.run_id,
         prepared.story_id,
         prepared.run_id
-    )
+    ))
 }
 
 fn terminate_child(child: &mut std::process::Child) {
@@ -458,11 +466,25 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
+    fn install_protocol_cli(temp: &tempfile::TempDir, config: &mut ResolvedConfig) {
+        let cli = temp.path().join("fake-harness-cli");
+        fs::write(&cli, r#"#!/bin/sh
+printf '%s\n' '{"protocol_version":1,"operation":"query.contract","request_id":null,"result":{"protocol_version":1,"cli_version":"0.1.14","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]},"error":null}'
+"#).unwrap();
+        let mut permissions = fs::metadata(&cli).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&cli, permissions).unwrap();
+        config.harness_cli = Some(cli);
+        config.repo_root = temp.path().to_path_buf();
+        config.harness_db = temp.path().join("harness.db");
+    }
+
     fn config(adapter: &str, command: Vec<&str>) -> ResolvedConfig {
         ResolvedConfig {
             version: 1,
             repo_root: Path::new("/repo").to_path_buf(),
             harness_db: Path::new("/repo/harness.db").to_path_buf(),
+            harness_cli: None,
             state_db: Path::new("/repo/.symphony/state.db").to_path_buf(),
             runs_dir: Path::new("/repo/.harness/runs").to_path_buf(),
             worktrees_dir: Path::new("/repo/.symphony/worktrees").to_path_buf(),
@@ -520,15 +542,65 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn agent_process_receives_explicit_worktree_repository_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree with spaces");
+        fs::create_dir_all(&worktree).unwrap();
+        let prepared = PreparedRun {
+            run_id: "run_env".to_owned(),
+            story_id: "US-ENV".to_owned(),
+            branch: None,
+            worktree: worktree.clone(),
+            contract_path: worktree.join("RUN_CONTRACT.json"),
+            harness_db_path: worktree.join("harness.db"),
+            lightweight: false,
+        };
+        let output = base_command(
+            &[
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "printf '%s\\n%s\\n%s\\n' \"$PWD\" \"$HARNESS_REPO_ROOT\" \"$HARNESS_DB_PATH\""
+                    .to_owned(),
+            ],
+            &prepared,
+        )
+        .output()
+        .unwrap();
+
+        assert!(output.status.success());
+        let lines = String::from_utf8(output.stdout).unwrap();
+        let values = lines.lines().collect::<Vec<_>>();
+        assert_eq!(values.len(), 3);
+        assert_eq!(
+            fs::canonicalize(values[0]).unwrap(),
+            fs::canonicalize(&worktree).unwrap()
+        );
+        assert_eq!(values[1], worktree.to_string_lossy());
+        assert_eq!(values[2], prepared.harness_db_path.to_string_lossy());
+    }
+
     #[test]
     fn codex_prompt_points_to_worktree_artifacts_and_run_env() {
-        let config = config("codex", vec![]);
-        let prompt = codex_prompt(&config, &prepared());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cli = temp_dir.path().join("Harness CLI with spaces");
+        fs::write(&cli, "#!/bin/sh\n").unwrap();
+        let mut permissions = fs::metadata(&cli).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&cli, permissions).unwrap();
+        let mut config = config("codex", vec![]);
+        config.repo_root = temp_dir.path().to_path_buf();
+        config.harness_cli = Some(cli.clone());
+        let prompt = codex_prompt(&config, &prepared()).unwrap();
 
         assert!(prompt.contains("US-046"));
         assert!(prompt.contains(".harness/runs/run_1/SUMMARY.md"));
         assert!(prompt.contains(".harness/changesets/run_1.changeset.jsonl"));
-        assert!(prompt.contains("/repo/scripts/bin/harness-cli"));
+        assert!(prompt.contains("\"executable\""));
+        assert!(prompt.contains("\"argv\":[]"));
+        assert!(prompt.contains("Harness CLI with spaces"));
+        assert!(!prompt.contains("scripts/bin/harness-cli"));
         assert!(prompt.contains("HARNESS_DB_PATH"));
         assert!(prompt.contains("top-level validation object"));
         assert!(prompt.contains("Do not write validation_evidence"));
@@ -561,6 +633,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
         fs::set_permissions(&fake_server, permissions).unwrap();
 
         let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
+        install_protocol_cli(&temp_dir, &mut config);
         config.agent_timeout_minutes = 1;
         let mut prepared = prepared();
         prepared.worktree = worktree.clone();
@@ -599,6 +672,7 @@ printf '%s\n' '{"id":4,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"
         fs::set_permissions(&fake_server, permissions).unwrap();
 
         let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
+        install_protocol_cli(&temp_dir, &mut config);
         config.agent_timeout_minutes = 0;
         let mut prepared = prepared();
         prepared.worktree = worktree.clone();
@@ -632,7 +706,8 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
         permissions.set_mode(0o755);
         fs::set_permissions(&fake_server, permissions).unwrap();
 
-        let config = config("codex", vec![fake_server.to_str().unwrap()]);
+        let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
+        install_protocol_cli(&temp_dir, &mut config);
         let mut prepared = prepared();
         prepared.worktree = worktree.clone();
         prepared.harness_db_path = worktree.join("harness.db");
@@ -669,6 +744,7 @@ printf '%s\n' '{"id":3,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"
         fs::set_permissions(&fake_server, permissions).unwrap();
 
         let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
+        install_protocol_cli(&temp_dir, &mut config);
         config.agent_timeout_minutes = 1;
         let mut prepared = prepared();
         prepared.worktree = worktree.clone();

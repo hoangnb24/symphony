@@ -4,6 +4,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::config::ResolvedConfig;
+use crate::harness_protocol::HarnessProtocol;
 use crate::run::{execute_run, RunError};
 use crate::state::{RunStateStore, StateError};
 use crate::work::{HarnessDbWorkSource, WorkError, WorkSource, EXTERNAL_WORK_SOURCE_BOUNDARIES};
@@ -102,7 +103,9 @@ fn run_auto_mode_with_runner(
 
     let store = RunStateStore::new(config.state_db.clone());
     store.ensure_migration_fence_released()?;
-    let source = HarnessDbWorkSource::new(&config.harness_db);
+    let protocol = HarnessProtocol::from_config(config).map_err(WorkError::from)?;
+    protocol.preflight().map_err(WorkError::from)?;
+    let source = HarnessDbWorkSource::new(&protocol);
     let mut summary = AutoRunSummary {
         source: source.name().to_owned(),
         enqueued: 0,
@@ -199,13 +202,28 @@ mod tests {
     use super::*;
     use crate::config::ResolvedConfig;
     use rusqlite::{params, Connection};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     fn config_for_root(root: &Path) -> ResolvedConfig {
+        let cli = root.join("fake-harness-cli");
+        fs::write(&cli, r#"#!/bin/sh
+if [ "$1 $2 $3" = "query contract --json" ]; then
+  printf '%s\n' '{"protocol_version":1,"operation":"query.contract","request_id":null,"result":{"protocol_version":1,"cli_version":"0.1.14","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]},"error":null}'
+elif [ "$1 $2 $3" = "query work-graph --json" ]; then
+  stories=$(sqlite3 -json "$HARNESS_DB_PATH" "SELECT id,title,risk_lane,NULL AS contract_doc,status,verify_command,(status='planned' AND verify_command IS NOT NULL) AS runnable FROM story ORDER BY id" | sed 's/\"runnable\":1/\"runnable\":true/g;s/\"runnable\":0/\"runnable\":false/g')
+  printf '%s\n' "{\"protocol_version\":1,\"operation\":\"query.work-graph\",\"request_id\":null,\"result\":{\"stories\":$stories,\"dependencies\":[],\"hierarchy\":[],\"revision\":\"fixture\"},\"error\":null}"
+else
+  exit 64
+fi
+"#).unwrap();
+        fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
         ResolvedConfig {
             version: 1,
             repo_root: root.to_path_buf(),
             harness_db: root.join("harness.db"),
+            harness_cli: Some(cli),
             state_db: root.join(".symphony/state.db"),
             runs_dir: root.join(".harness/runs"),
             worktrees_dir: root.join(".symphony/worktrees"),

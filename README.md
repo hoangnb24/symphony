@@ -15,14 +15,15 @@ crates/harness-symphony/web-ui/   React, Playwright, and Electron UI
 The Cargo workspace has exactly that one member and does not depend on a
 checkout of `repository-harness`.
 
-## Provisional Harness installation
+## Harness runtime
 
 The generic Harness template is installed with merge semantics so contributors
-can inspect its policies and schemas. The downloaded `scripts/bin/harness-cli`
-is the pre-protocol `harness-cli-v0.1.11` binary and is deliberately
-provisional: do not initialize or mutate a target Harness database yet. US-093
-must perform a checksum-verified forced upgrade to the exact protocol-v1
-release from US-092 before creating the target durable planning state.
+can inspect its policies and schemas. Symphony consumes the checksum-verified
+`harness-cli-v0.1.14` protocol-v1 release through a typed process adapter; it
+does not depend on Harness source or tables. See
+[`docs/contracts/harness-runtime-v1.md`](docs/contracts/harness-runtime-v1.md)
+for the exact compatibility tuple, executable discovery order, and upgrade
+command.
 
 ## Prerequisites
 

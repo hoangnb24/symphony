@@ -22,6 +22,9 @@ use thiserror::Error;
 use crate::config::ResolvedConfig;
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const CONTRACT_SCHEMA_MINIMUM: u32 = 1;
+pub const CONTRACT_SCHEMA_MAXIMUM: u32 = 13;
+pub const SUPPORTED_DATABASE_SCHEMA_MINIMUM: u32 = 12;
 pub const OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MUTATION_TIMEOUT: Duration = Duration::from_secs(300);
@@ -65,6 +68,13 @@ pub struct HarnessProtocol {
     repo_root: PathBuf,
     harness_db: PathBuf,
     policy: ProtocolPolicy,
+    run_context: Option<RunContext>,
+}
+
+#[derive(Debug, Clone)]
+struct RunContext {
+    run_id: String,
+    run_mode: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -199,10 +209,17 @@ pub enum HarnessProtocolError {
     MalformedJson { operation: String, reason: String },
     #[error("Harness CLI response for {actual} did not match requested operation {expected}; upgrade or repair the CLI")]
     OperationMismatch { expected: String, actual: String },
+    #[error("Harness CLI {operation} returned a result that does not match the request: {reason}")]
+    ResultMismatch { operation: String, reason: String },
     #[error("unsupported Harness protocol {actual}, expected {expected}; install the pinned compatible Harness release")]
     ProtocolVersion { expected: u32, actual: u32 },
     #[error("Harness CLI {actual} is not in the tested support set; install harness-cli-v0.1.14 or add an explicitly verified release")]
     UnsupportedCliVersion { actual: String },
+    #[error("Harness CLI schema contract {actual_minimum}..={actual_maximum} does not match the tested 1..=13 tuple; install harness-cli-v0.1.14")]
+    SchemaContractRange {
+        actual_minimum: u32,
+        actual_maximum: u32,
+    },
     #[error("Harness database at {database} is missing; initialize it explicitly with the compatible Harness CLI")]
     DatabaseMissing { database: PathBuf },
     #[error("Harness database at {database} needs migration; migrate it explicitly, then rerun compatibility discovery")]
@@ -239,7 +256,7 @@ pub enum HarnessProtocolError {
 
 impl HarnessProtocol {
     pub fn from_config(config: &ResolvedConfig) -> Result<Self, HarnessProtocolError> {
-        Self::from_configured_path(config, None)
+        Self::from_configured_path(config, config.harness_cli.as_deref())
     }
 
     /// Construct from resolved repository settings plus the optional
@@ -263,11 +280,24 @@ impl HarnessProtocol {
             repo_root,
             harness_db,
             policy: ProtocolPolicy::default(),
+            run_context: None,
         }
     }
 
     pub fn with_policy(mut self, policy: ProtocolPolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    pub fn with_run_context(
+        mut self,
+        run_id: impl Into<String>,
+        run_mode: impl Into<String>,
+    ) -> Self {
+        self.run_context = Some(RunContext {
+            run_id: run_id.into(),
+            run_mode: run_mode.into(),
+        });
         self
     }
 
@@ -296,7 +326,7 @@ impl HarnessProtocol {
     }
 
     pub fn snapshot(&self, output: &Path) -> Result<SnapshotResult, HarnessProtocolError> {
-        self.mutate(
+        let result: SnapshotResult = self.mutate(
             "db.snapshot",
             [
                 OsString::from("db"),
@@ -305,7 +335,18 @@ impl HarnessProtocol {
                 output.as_os_str().to_owned(),
                 OsString::from("--json"),
             ],
-        )
+        )?;
+        if Path::new(&result.output) != output {
+            return Err(HarnessProtocolError::ResultMismatch {
+                operation: "db.snapshot".to_owned(),
+                reason: format!(
+                    "reported output {} instead of {}",
+                    result.output,
+                    output.display()
+                ),
+            });
+        }
+        Ok(result)
     }
 
     pub fn compare_and_set_status(
@@ -329,7 +370,18 @@ impl HarnessProtocol {
             args.push(OsString::from("--require-runnable"));
         }
         args.push(OsString::from("--json"));
-        self.mutate("story.update", args)
+        let result: StoryCasResult = self.mutate("story.update", args)?;
+        if result.id != id
+            || result.before_status != expected_status
+            || result.after_status != status
+            || (require_runnable && !result.runnable_before)
+        {
+            return Err(HarnessProtocolError::ResultMismatch {
+                operation: "story.update".to_owned(),
+                reason: "CAS identity/status/runnable fields differ from the request".to_owned(),
+            });
+        }
+        Ok(result)
     }
 
     pub fn changeset_status(&self, path: &Path) -> Result<ChangesetStatus, HarnessProtocolError> {
@@ -390,14 +442,21 @@ impl HarnessProtocol {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut child = Command::new(&self.executable)
+        let mut command = Command::new(&self.executable);
+        command
             .args(args)
             .current_dir(&self.repo_root)
             .env("HARNESS_REPO_ROOT", &self.repo_root)
             .env("HARNESS_DB_PATH", &self.harness_db)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(context) = &self.run_context {
+            command
+                .env("HARNESS_RUN_ID", &context.run_id)
+                .env("HARNESS_RUN_MODE", &context.run_mode);
+        }
+        let mut child = command
             .spawn()
             .map_err(|source| HarnessProtocolError::Spawn {
                 path: self.executable.clone(),
@@ -463,10 +522,18 @@ pub fn validate_contract(
             actual: contract.cli_version.clone(),
         });
     }
+    if contract.schema_minimum != CONTRACT_SCHEMA_MINIMUM
+        || contract.schema_maximum != CONTRACT_SCHEMA_MAXIMUM
+    {
+        return Err(HarnessProtocolError::SchemaContractRange {
+            actual_minimum: contract.schema_minimum,
+            actual_maximum: contract.schema_maximum,
+        });
+    }
     match contract.database_state {
         DatabaseState::Current
             if contract.database_schema_version.is_some_and(|version| {
-                version >= contract.schema_minimum && version <= contract.schema_maximum
+                version >= SUPPORTED_DATABASE_SCHEMA_MINIMUM && version <= contract.schema_maximum
             }) => {}
         DatabaseState::Current => {
             return Err(HarnessProtocolError::DatabaseUnsupported {
@@ -616,8 +683,15 @@ fn parse_response<T: DeserializeOwned>(
             reason: "machine response is not newline terminated".to_owned(),
         });
     }
+    let body = text.strip_suffix('\n').expect("checked trailing newline");
+    if body.contains('\n') || body.contains('\r') {
+        return Err(HarnessProtocolError::MalformedJson {
+            operation: operation.to_owned(),
+            reason: "machine response must be exactly one JSON line".to_owned(),
+        });
+    }
     let envelope: Envelope<T> =
-        serde_json::from_str(&text).map_err(|error| HarnessProtocolError::MalformedJson {
+        serde_json::from_str(body).map_err(|error| HarnessProtocolError::MalformedJson {
             operation: operation.to_owned(),
             reason: error.to_string(),
         })?;

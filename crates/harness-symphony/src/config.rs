@@ -25,6 +25,7 @@ pub struct ResolvedConfig {
     pub version: u32,
     pub repo_root: PathBuf,
     pub harness_db: PathBuf,
+    pub harness_cli: Option<PathBuf>,
     pub state_db: PathBuf,
     pub runs_dir: PathBuf,
     pub worktrees_dir: PathBuf,
@@ -260,6 +261,11 @@ impl SymphonyConfig {
         ResolvedConfig {
             version: self.version,
             harness_db: normalize_path(&repo_root, &self.repo.harness_db),
+            harness_cli: self
+                .repo
+                .harness_cli
+                .as_ref()
+                .map(|path| normalize_path(&repo_root, path)),
             state_db: normalize_path(&repo_root, &self.symphony.state_db),
             runs_dir: normalize_path(&repo_root, &self.symphony.runs_dir),
             worktrees_dir: normalize_path(&repo_root, &self.symphony.worktrees_dir),
@@ -281,17 +287,6 @@ impl SymphonyConfig {
             auto_max_attempts: self.auto.max_attempts,
             repo_root,
         }
-    }
-
-    /// Resolve the optional operator-pinned Harness CLI against the same
-    /// repository root used by [`Self::resolve`].
-    #[allow(dead_code)] // consumed as protocol call sites migrate during US-093
-    pub fn resolve_harness_cli(&self, current_root: &Path) -> Option<PathBuf> {
-        let repo_root = normalize_path(current_root, &self.repo.root);
-        self.repo
-            .harness_cli
-            .as_ref()
-            .map(|path| normalize_path(&repo_root, path))
     }
 }
 
@@ -459,7 +454,7 @@ auto:
             PathBuf::from("/repo/workspace/db/copy.db")
         );
         assert_eq!(
-            config.resolve_harness_cli(Path::new("/repo")),
+            resolved.harness_cli,
             Some(PathBuf::from(
                 "/repo/workspace/tools with spaces/harness-cli"
             ))

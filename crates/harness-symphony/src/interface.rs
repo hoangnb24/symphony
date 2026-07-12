@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::auto::{options_from_config, run_auto_mode, AutoError, AutoRunSummary};
 use crate::config::{ConfigError, ResolvedConfig, SymphonyConfig};
 use crate::doctor::{print_report, run_doctor, DoctorError};
+use crate::harness_protocol::HarnessProtocol;
 use crate::pr::{create_pr, PrCreateResult, PrError};
 use crate::retention::{compact_runs, CompactResult, RetentionError};
 use crate::run::{
@@ -255,12 +256,14 @@ pub fn run(cli: Cli) -> Result<(), InterfaceError> {
                 std::process::exit(1);
             }
         }
-        Command::Work(args) => match args.action {
-            WorkAction::List => print_work_items(&list_work(&resolved.harness_db)?),
-            WorkAction::Board => {
-                print_board_items(&list_board(&resolved.harness_db, &resolved.state_db)?)
+        Command::Work(args) => {
+            let protocol = HarnessProtocol::from_config(&resolved).map_err(WorkError::from)?;
+            protocol.preflight().map_err(WorkError::from)?;
+            match args.action {
+                WorkAction::List => print_work_items(&list_work(&protocol)?),
+                WorkAction::Board => print_board_items(&list_board(&protocol, &resolved.state_db)?),
             }
-        },
+        }
         Command::Run(args) => {
             if args.prepare_only {
                 let prepared = if args.here {
@@ -379,6 +382,14 @@ fn print_config(config: &ResolvedConfig) {
     println!("version: {}", config.version);
     println!("repo_root: {}", config.repo_root.display());
     println!("harness_db: {}", config.harness_db.display());
+    println!(
+        "harness_cli: {}",
+        config
+            .harness_cli
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "auto (HARNESS_CLI_PATH, target-local, PATH)".to_owned())
+    );
     println!("state_db: {}", config.state_db.display());
     println!("runs_dir: {}", config.runs_dir.display());
     println!("worktrees_dir: {}", config.worktrees_dir.display());

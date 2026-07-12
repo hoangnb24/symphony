@@ -4,7 +4,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -12,6 +11,7 @@ use thiserror::Error;
 use crate::agent::{run_agent, AgentError};
 use crate::changeset::{append_rendered_section, ChangesetError};
 use crate::config::ResolvedConfig;
+use crate::harness_protocol::{HarnessProtocol, HarnessProtocolError, Story as HarnessStory};
 use crate::state::{NewRunRecord, RunStateStore, StateError};
 use crate::sync::{refresh_checkout_from_upstream, SyncError};
 
@@ -19,14 +19,12 @@ use crate::sync::{refresh_checkout_from_upstream, SyncError};
 pub enum RunError {
     #[error("story {0} not found in harness database")]
     StoryNotFound(String),
-    #[error("story {id} is not runnable because status is {status}; only planned or in_progress can be prepared")]
+    #[error("story {id} is not runnable because Harness reports status {status} as non-runnable; require status planned, a configured verifier, and implemented dependency blockers")]
     StoryNotRunnable { id: String, status: String },
     #[error("story {id} cannot use --here because lane is {lane}; only tiny stories may run in the current checkout")]
     StoryNotTiny { id: String, lane: String },
     #[error("--here is disabled by config. Set runs.allow_here_for_tiny: true in .harness/symphony.yml.")]
     HereRunDisabled,
-    #[error("harness database not found at {0}. Run: scripts/bin/harness-cli init")]
-    MissingDatabase(String),
     #[error("git worktree failed: {0}")]
     GitWorktree(String),
     #[error("run result validation failed: {0}")]
@@ -35,8 +33,8 @@ pub enum RunError {
     Agent(#[from] AgentError),
     #[error("{0}")]
     State(#[from] StateError),
-    #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    #[error("{0}")]
+    HarnessProtocol(#[from] HarnessProtocolError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
@@ -75,11 +73,18 @@ pub struct RunContract {
     pub lightweight: bool,
     pub worktree: String,
     pub harness_db_path: String,
+    pub harness_cli: HarnessCliInvocation,
     pub env: RunEnvironment,
     pub required_outputs: Vec<String>,
     pub result_json_schema: Value,
     pub forbidden_paths: Vec<String>,
     pub agent_instructions: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct HarnessCliInvocation {
+    pub executable: String,
+    pub argv: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -112,10 +117,17 @@ struct ValidationCommand {
 }
 
 pub fn prepare_run(config: &ResolvedConfig, story_id: &str) -> Result<PreparedRun, RunError> {
+    let protocol = HarnessProtocol::from_config(config)?;
+    protocol.preflight()?;
     ensure_migration_fence_released(config)?;
     ensure_no_active_run(config)?;
+    load_runnable_story(&protocol, story_id)?;
     refresh_checkout_from_upstream(config)?;
-    let story = load_runnable_story(&config.harness_db, story_id)?;
+    let protocol = HarnessProtocol::from_config(config)?;
+    protocol.preflight()?;
+    ensure_migration_fence_released(config)?;
+    ensure_no_active_run(config)?;
+    let story = load_runnable_story(&protocol, story_id)?;
 
     let run_id = generate_run_id();
     let branch = format!("symphony/{run_id}");
@@ -127,8 +139,8 @@ pub fn prepare_run(config: &ResolvedConfig, story_id: &str) -> Result<PreparedRu
     fs::create_dir_all(&config.worktrees_dir)?;
     fs::create_dir_all(&run_dir)?;
     create_worktree(&config.repo_root, &branch, &worktree)?;
-    fs::copy(&config.harness_db, &harness_db_path)?;
-    mark_story_in_progress(&harness_db_path, story_id)?;
+    protocol.snapshot(&harness_db_path)?;
+    mark_story_in_progress(&worktree, &protocol, &harness_db_path, &story, &run_id)?;
 
     let contract = build_contract(
         config,
@@ -137,6 +149,7 @@ pub fn prepare_run(config: &ResolvedConfig, story_id: &str) -> Result<PreparedRu
         false,
         &worktree,
         &harness_db_path,
+        protocol.executable(),
     );
     write_contract(&contract_path, &contract)?;
     write_agents_shim(&worktree.join("AGENTS.md"), &contract_path, &contract)?;
@@ -168,14 +181,27 @@ pub fn prepare_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Prepa
     if !config.allow_here_for_tiny {
         return Err(RunError::HereRunDisabled);
     }
+    let protocol = HarnessProtocol::from_config(config)?;
+    protocol.preflight()?;
     ensure_migration_fence_released(config)?;
     ensure_no_active_run(config)?;
+    let initial_story = load_runnable_story(&protocol, story_id)?;
+    if initial_story.risk_lane != "tiny" {
+        return Err(RunError::StoryNotTiny {
+            id: initial_story.id,
+            lane: initial_story.risk_lane,
+        });
+    }
     refresh_checkout_from_upstream(config)?;
-    let story = load_runnable_story(&config.harness_db, story_id)?;
-    if story.lane != "tiny" {
+    let protocol = HarnessProtocol::from_config(config)?;
+    protocol.preflight()?;
+    ensure_migration_fence_released(config)?;
+    ensure_no_active_run(config)?;
+    let story = load_runnable_story(&protocol, story_id)?;
+    if story.risk_lane != "tiny" {
         return Err(RunError::StoryNotTiny {
             id: story.id,
-            lane: story.lane,
+            lane: story.risk_lane,
         });
     }
 
@@ -187,8 +213,14 @@ pub fn prepare_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Prepa
 
     fs::create_dir_all(&run_dir)?;
     fs::create_dir_all(&local_run_dir)?;
-    fs::copy(&config.harness_db, &harness_db_path)?;
-    mark_story_in_progress(&harness_db_path, story_id)?;
+    protocol.snapshot(&harness_db_path)?;
+    mark_story_in_progress(
+        &config.repo_root,
+        &protocol,
+        &harness_db_path,
+        &story,
+        &run_id,
+    )?;
 
     let contract = build_contract(
         config,
@@ -197,6 +229,7 @@ pub fn prepare_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Prepa
         true,
         &config.repo_root,
         &harness_db_path,
+        protocol.executable(),
     );
     write_contract(&contract_path, &contract)?;
 
@@ -235,6 +268,7 @@ pub fn execute_prepared_run(
     config: &ResolvedConfig,
     prepared: PreparedRun,
 ) -> Result<CompletedRun, RunError> {
+    HarnessProtocol::from_config(config)?.preflight()?;
     ensure_migration_fence_released(config)?;
     if let Err(error) = run_agent(config, &prepared) {
         RunStateStore::new(config.state_db.clone()).update_status(
@@ -265,9 +299,17 @@ pub fn execute_prepared_run(
     Ok(completed)
 }
 
-fn load_runnable_story(db_path: &Path, story_id: &str) -> Result<Story, RunError> {
-    let story = load_story(db_path, story_id)?;
-    if !matches!(story.status.as_str(), "planned" | "in_progress") {
+fn load_runnable_story(
+    protocol: &HarnessProtocol,
+    story_id: &str,
+) -> Result<HarnessStory, RunError> {
+    let story = protocol
+        .work_graph()?
+        .stories
+        .into_iter()
+        .find(|story| story.id == story_id)
+        .ok_or_else(|| RunError::StoryNotFound(story_id.to_owned()))?;
+    if !story.runnable {
         return Err(RunError::StoryNotRunnable {
             id: story.id,
             status: story.status,
@@ -288,27 +330,6 @@ fn ensure_migration_fence_released(config: &ResolvedConfig) -> Result<(), RunErr
     Ok(())
 }
 
-fn load_story(db_path: &Path, story_id: &str) -> Result<Story, RunError> {
-    if !db_path.exists() {
-        return Err(RunError::MissingDatabase(db_path.display().to_string()));
-    }
-    let connection = Connection::open(db_path)?;
-    connection
-        .query_row(
-            "SELECT id, status, risk_lane FROM story WHERE id=?1;",
-            params![story_id],
-            |row| {
-                Ok(Story {
-                    id: row.get(0)?,
-                    status: row.get(1)?,
-                    lane: row.get(2)?,
-                })
-            },
-        )
-        .optional()?
-        .ok_or_else(|| RunError::StoryNotFound(story_id.to_owned()))
-}
-
 fn create_worktree(repo_root: &Path, branch: &str, worktree: &Path) -> Result<(), RunError> {
     let output = Command::new("git")
         .args(["worktree", "add", "-b", branch])
@@ -325,12 +346,20 @@ fn create_worktree(repo_root: &Path, branch: &str, worktree: &Path) -> Result<()
     }
 }
 
-fn mark_story_in_progress(db_path: &Path, story_id: &str) -> Result<(), RunError> {
-    let connection = Connection::open(db_path)?;
-    connection.execute(
-        "UPDATE story SET status='in_progress' WHERE id=?1 AND status='planned';",
-        params![story_id],
-    )?;
+fn mark_story_in_progress(
+    run_repo_root: &Path,
+    source_protocol: &HarnessProtocol,
+    db_path: &Path,
+    story: &HarnessStory,
+    run_id: &str,
+) -> Result<(), RunError> {
+    let isolated = HarnessProtocol::new(
+        source_protocol.executable().to_path_buf(),
+        run_repo_root.to_path_buf(),
+        db_path.to_path_buf(),
+    )
+    .with_run_context(run_id, "execute");
+    isolated.compare_and_set_status(&story.id, &story.status, "in_progress", true)?;
     Ok(())
 }
 
@@ -341,6 +370,7 @@ fn build_contract(
     lightweight: bool,
     worktree: &Path,
     harness_db_path: &Path,
+    harness_executable: &Path,
 ) -> RunContract {
     let required_outputs = vec![
         format!(".harness/runs/{run_id}/SUMMARY.md"),
@@ -376,6 +406,15 @@ fn build_contract(
         lightweight,
         worktree: display_path(config, worktree),
         harness_db_path: display_path(config, harness_db_path),
+        harness_cli: HarnessCliInvocation {
+            executable: harness_executable.display().to_string(),
+            argv: vec![
+                "story".to_owned(),
+                "complete".to_owned(),
+                story_id.to_owned(),
+                "--json".to_owned(),
+            ],
+        },
         env: RunEnvironment {
             harness_db_path: display_path(config, harness_db_path),
             harness_run_id: run_id.to_owned(),
@@ -386,9 +425,9 @@ fn build_contract(
         forbidden_paths,
         agent_instructions: vec![
             "Follow AGENTS.md and Harness docs.".to_owned(),
-            "For resolver stories, record a completed implementation trace and then run scripts/bin/harness-cli story complete <story-id>; story verify is proof-only.".to_owned(),
+            "For resolver stories, record a completed implementation trace and then invoke harness_cli.executable with harness_cli.argv; story verify is proof-only.".to_owned(),
             "Implement only the assigned story scope.".to_owned(),
-            "Use the copied harness.db.".to_owned(),
+            "Use only the isolated Harness DB snapshot named by HARNESS_DB_PATH.".to_owned(),
             "Run the configured verification command when available.".to_owned(),
             "Write RESULT.json with a top-level validation object, not validation_evidence. Use validation.commands[].result values pass, fail, or unavailable.".to_owned(),
         ],
@@ -627,15 +666,20 @@ fn render_agents_shim(contract_path: &Path, contract: &RunContract) -> String {
 - Story: `{}`\n\
 - Contract: `{}`\n\
 - Harness DB: `{}`\n\
+- Harness CLI executable: `{}`\n\
+- Harness CLI argv prefix: `{}`\n\
 - Required outputs: `{}` and `{}`\n\
 - RESULT.json schema: `{}`\n\
 - Forbidden paths: `{}`\n\
 \n\
 Use `HARNESS_DB_PATH={}`, `HARNESS_RUN_ID={}`, and `HARNESS_RUN_MODE=execute` for Harness CLI writes.\n\
+Invoke the executable and argv as separate process fields; do not join them into a shell command string.\n\
 <!-- HARNESS-SYMPHONY:END -->\n",
         contract.story_id,
         contract_path.display(),
         contract.harness_db_path,
+        contract.harness_cli.executable,
+        serde_json::to_string(&contract.harness_cli.argv).unwrap_or_else(|_| "[]".to_owned()),
         contract.required_outputs[0],
         contract.required_outputs[1],
         contract.result_json_schema,
@@ -668,23 +712,18 @@ fn generate_run_id() -> String {
     format!("run_{}_{}_{}", timestamp, std::process::id(), sequence)
 }
 
-#[derive(Debug)]
-struct Story {
-    id: String,
-    status: String,
-    lane: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::ResolvedConfig;
+    use rusqlite::{params, Connection};
 
     fn config() -> ResolvedConfig {
         ResolvedConfig {
             version: 1,
             repo_root: PathBuf::from("/repo"),
             harness_db: PathBuf::from("/repo/harness.db"),
+            harness_cli: None,
             state_db: PathBuf::from("/repo/.symphony/state.db"),
             runs_dir: PathBuf::from("/repo/.harness/runs"),
             worktrees_dir: PathBuf::from("/repo/.symphony/worktrees"),
@@ -737,6 +776,37 @@ mod tests {
                 params![id, "fixture", status, lane],
             )
             .unwrap();
+        install_fake_cli(path.parent().unwrap());
+    }
+
+    fn install_fake_cli(root: &Path) {
+        let bin = root.join("scripts/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let cli = bin.join("harness-cli");
+        let script = r###"#!/bin/sh
+set -eu
+operation="$1.$2"
+if [ "$operation" = "query.contract" ]; then
+  printf '%s\n' '{"protocol_version":1,"operation":"query.contract","result":{"protocol_version":1,"cli_version":"0.1.14","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]}}'
+elif [ "$operation" = "query.work-graph" ]; then
+  python3 -c 'import json,os,sqlite3; c=sqlite3.connect(os.environ["HARNESS_DB_PATH"]); r=c.execute("select id,title,risk_lane,status,verify_command from story order by id").fetchall(); stories=[{"id":x[0],"title":x[1],"risk_lane":x[2],"contract_doc":None,"status":x[3],"verify_command":x[4],"runnable":x[3] in ("planned","in_progress")} for x in r]; print(json.dumps({"protocol_version":1,"operation":"query.work-graph","result":{"stories":stories,"dependencies":[],"hierarchy":[],"revision":"fixture"}}))'
+elif [ "$operation" = "db.snapshot" ]; then
+  output="$4"
+  python3 -c 'import os,sqlite3,sys; s=sqlite3.connect(os.environ["HARNESS_DB_PATH"]); d=sqlite3.connect(sys.argv[1]); s.backup(d); d.close(); s.close()' "$output"
+  python3 -c 'import json,sys; print(json.dumps({"protocol_version":1,"operation":"db.snapshot","result":{"output":sys.argv[1],"source_logical_sha256":"logical","graph_revision":"fixture","snapshot_file_sha256":"snapshot"}}))' "$output"
+elif [ "$operation" = "story.update" ]; then
+  id="$4"; status="$6"; expected="$8"
+  python3 -c 'import json,os,sqlite3,sys; c=sqlite3.connect(os.environ["HARNESS_DB_PATH"]); row=c.execute("select status from story where id=?",(sys.argv[1],)).fetchone(); assert row and row[0]==sys.argv[3]; c.execute("update story set status=? where id=?",(sys.argv[2],sys.argv[1])); c.commit(); print(json.dumps({"protocol_version":1,"operation":"story.update","result":{"id":sys.argv[1],"before_status":sys.argv[3],"after_status":sys.argv[2],"runnable_before":True}}))' "$id" "$status" "$expected"
+else
+  exit 2
+fi
+"###;
+        fs::write(&cli, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     #[test]
@@ -749,6 +819,7 @@ mod tests {
             false,
             Path::new("/repo/.symphony/worktrees/run_1"),
             Path::new("/repo/.symphony/worktrees/run_1/harness.db"),
+            Path::new("/tools with spaces/harness-cli"),
         );
 
         assert_eq!(contract.version, 1);
@@ -761,6 +832,14 @@ mod tests {
         );
         assert_eq!(contract.env.harness_run_id, "run_1");
         assert_eq!(contract.env.harness_run_mode, "execute");
+        assert_eq!(
+            contract.harness_cli.executable,
+            "/tools with spaces/harness-cli"
+        );
+        assert_eq!(
+            contract.harness_cli.argv,
+            ["story", "complete", "US-036", "--json"]
+        );
         assert!(contract
             .required_outputs
             .contains(&".harness/runs/run_1/RESULT.json".to_owned()));
@@ -785,24 +864,32 @@ mod tests {
             false,
             Path::new("/repo/.symphony/worktrees/run_completion"),
             Path::new("/repo/.symphony/worktrees/run_completion/harness.db"),
+            Path::new("/repo/scripts/bin/harness-cli"),
         );
 
         assert!(contract.agent_instructions.iter().any(|instruction| {
             instruction.contains("record a completed implementation trace")
-                && instruction.contains("story complete <story-id>")
+                && instruction.contains("harness_cli.executable")
+                && instruction.contains("harness_cli.argv")
                 && instruction.contains("story verify is proof-only")
         }));
     }
 
     #[test]
-    fn run_contract_copied_story_enters_in_progress_before_completion() {
+    fn run_contract_snapshot_story_enters_in_progress_via_cas() {
         let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
         let db_path = temp_dir.path().join("harness.db");
         write_story_db(&db_path, "US-077", "planned", "high_risk");
+        let source = HarnessProtocol::from_config(&config).unwrap();
+        let snapshot = temp_dir.path().join("snapshot.db");
+        source.snapshot(&snapshot).unwrap();
+        let story = load_runnable_story(&source, "US-077").unwrap();
 
-        mark_story_in_progress(&db_path, "US-077").unwrap();
+        mark_story_in_progress(&config.repo_root, &source, &snapshot, &story, "run_fixture")
+            .unwrap();
 
-        let connection = Connection::open(&db_path).unwrap();
+        let connection = Connection::open(&snapshot).unwrap();
         let status: String = connection
             .query_row("SELECT status FROM story WHERE id='US-077';", [], |row| {
                 row.get(0)
@@ -810,19 +897,47 @@ mod tests {
             .unwrap();
         assert_eq!(status, "in_progress");
 
-        connection
-            .execute(
-                "UPDATE story SET status='implemented' WHERE id='US-077';",
-                [],
-            )
-            .unwrap();
-        mark_story_in_progress(&db_path, "US-077").unwrap();
-        let terminal_status: String = connection
+        let source_status: String = Connection::open(&db_path)
+            .unwrap()
             .query_row("SELECT status FROM story WHERE id='US-077';", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(terminal_status, "implemented");
+        assert_eq!(source_status, "planned");
+    }
+
+    #[test]
+    fn fake_cli_snapshot_includes_committed_wal_story_without_mutating_source() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        write_story_db(&config.harness_db, "US-BASE", "planned", "normal");
+        let writer = Connection::open(&config.harness_db).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer
+            .execute(
+                "INSERT INTO story (id, title, status, risk_lane) VALUES ('US-WAL', 'wal', 'planned', 'tiny')",
+                [],
+            )
+            .unwrap();
+
+        let protocol = HarnessProtocol::from_config(&config).unwrap();
+        let snapshot = temp_dir.path().join("isolated/harness.db");
+        fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        protocol.snapshot(&snapshot).unwrap();
+
+        let snap_status: String = Connection::open(snapshot)
+            .unwrap()
+            .query_row("SELECT status FROM story WHERE id='US-WAL'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let source_status: String = writer
+            .query_row("SELECT status FROM story WHERE id='US-WAL'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(snap_status, "planned");
+        assert_eq!(source_status, "planned");
     }
 
     #[test]
@@ -835,6 +950,7 @@ mod tests {
             true,
             Path::new("/repo"),
             Path::new("/repo/.symphony/runs/run_1/harness.db"),
+            Path::new("/repo/scripts/bin/harness-cli"),
         );
 
         assert!(contract.lightweight);
@@ -855,6 +971,7 @@ mod tests {
             false,
             Path::new("/repo/.symphony/worktrees/run_1"),
             Path::new("/repo/.symphony/worktrees/run_1/harness.db"),
+            Path::new("/repo/scripts/bin/harness-cli"),
         );
         let shim = render_agents_shim(
             Path::new("/repo/.harness/runs/run_1/RUN_CONTRACT.json"),
@@ -929,6 +1046,7 @@ mod tests {
     fn prepare_run_checks_active_lock_before_creating_worktree_artifacts() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = config_for_root(temp_dir.path());
+        install_fake_cli(temp_dir.path());
         let store = RunStateStore::new(config.state_db.clone());
         store
             .add_run(NewRunRecord {
@@ -978,6 +1096,7 @@ mod tests {
     fn prepared_run_cannot_launch_agent_after_fence_is_acquired() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = config_for_root(temp_dir.path());
+        install_fake_cli(temp_dir.path());
         let prepared = PreparedRun {
             run_id: "run_fenced".to_owned(),
             story_id: "US-FENCED".to_owned(),

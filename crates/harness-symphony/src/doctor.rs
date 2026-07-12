@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::agent::{agent_adapter_status, AgentError};
 use crate::config::ResolvedConfig;
+use crate::harness_protocol::{Contract, HarnessProtocol, HarnessProtocolError};
 use crate::sync::unapplied_changesets;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,20 +54,65 @@ pub enum DoctorError {
 }
 
 pub fn run_doctor(config: &ResolvedConfig) -> Result<DoctorReport, DoctorError> {
-    let checks = vec![
+    let protocol_check = check_harness_protocol(config);
+    let protocol_ready = protocol_check.status == CheckStatus::Pass;
+    let mut checks = vec![
         check_git_available(),
         check_git_worktree_support(),
         check_repo_root(&config.repo_root),
         check_database_or_changesets(config),
-        check_harness_cli_exists(config),
-        check_harness_db_path_support(config)?,
-        check_operation_log_support(config)?,
-        check_unapplied_changesets(config),
+        protocol_check,
         check_gitignore(config),
         check_agent_adapter(config),
         check_pr_adapter(config),
     ];
+    if protocol_ready {
+        checks.insert(5, check_unapplied_changesets(config));
+    }
     Ok(DoctorReport { checks })
+}
+
+fn check_harness_protocol(config: &ResolvedConfig) -> DoctorCheck {
+    let protocol = match HarnessProtocol::from_config(config) {
+        Ok(protocol) => protocol,
+        Err(error) => return protocol_failure(error),
+    };
+    match protocol.preflight() {
+        Ok(contract) => protocol_success(protocol.executable(), &contract),
+        Err(error) => protocol_failure(error),
+    }
+}
+
+fn protocol_success(executable: &Path, contract: &Contract) -> DoctorCheck {
+    DoctorCheck {
+        name: "Harness protocol",
+        status: CheckStatus::Pass,
+        detail: format!(
+            "CLI {} at {}, protocol {}, schema {}, all required capabilities present",
+            contract.cli_version,
+            executable.display(),
+            contract.protocol_version,
+            contract
+                .database_schema_version
+                .map_or_else(|| "unknown".to_owned(), |v| v.to_string())
+        ),
+        next: None,
+    }
+}
+
+fn protocol_failure(error: HarnessProtocolError) -> DoctorCheck {
+    DoctorCheck {
+        name: "Harness protocol",
+        status: CheckStatus::Fail,
+        detail: error.to_string(),
+        next: Some(match error {
+            HarnessProtocolError::DatabaseMissing { .. } =>
+                "Initialize the database explicitly with harness-cli-v0.1.14, then rerun doctor.".to_owned(),
+            HarnessProtocolError::DatabaseNeedsMigration { .. } =>
+                "Back up and migrate the database with harness-cli-v0.1.14, then rerun doctor.".to_owned(),
+            _ => "Install the checksum-verified harness-cli-v0.1.14 release or configure repo.harness_cli/HARNESS_CLI_PATH, then rerun doctor.".to_owned(),
+        }),
+    }
 }
 
 fn check_unapplied_changesets(config: &ResolvedConfig) -> DoctorCheck {
@@ -179,7 +225,7 @@ fn check_database_or_changesets(config: &ResolvedConfig) -> DoctorCheck {
             status: CheckStatus::Warn,
             detail: "database is absent but changesets are available".to_owned(),
             next: Some(format!(
-                "Run: scripts/bin/harness-cli db rebuild --from {}",
+                "Use the configured Harness CLI executable with argv [\"db\", \"rebuild\", \"--from\", \"{}\"]",
                 config.changeset_directory.display()
             )),
         };
@@ -188,110 +234,7 @@ fn check_database_or_changesets(config: &ResolvedConfig) -> DoctorCheck {
         name: "harness database",
         status: CheckStatus::Fail,
         detail: "harness.db is absent and no changesets directory exists".to_owned(),
-        next: Some("Run: scripts/bin/harness-cli init".to_owned()),
-    }
-}
-
-fn check_harness_cli_exists(config: &ResolvedConfig) -> DoctorCheck {
-    let cli = harness_cli_path(config);
-    match Command::new(&cli).arg("--version").output() {
-        Ok(output) if output.status.success() => DoctorCheck {
-            name: "harness-cli",
-            status: CheckStatus::Pass,
-            detail: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
-            next: None,
-        },
-        _ => DoctorCheck {
-            name: "harness-cli",
-            status: CheckStatus::Fail,
-            detail: format!("{} is not runnable", cli.display()),
-            next: Some("Build or install scripts/bin/harness-cli.".to_owned()),
-        },
-    }
-}
-
-fn check_harness_db_path_support(config: &ResolvedConfig) -> Result<DoctorCheck, DoctorError> {
-    let temp_dir = tempfile::tempdir()?;
-    prepare_temp_schema(config, temp_dir.path())?;
-    let path_db = temp_dir.path().join("path.db");
-    let legacy_db = temp_dir.path().join("legacy.db");
-    let cli = harness_cli_path(config);
-    let output = Command::new(&cli)
-        .arg("init")
-        .env("HARNESS_REPO_ROOT", temp_dir.path())
-        .env("HARNESS_DB_PATH", &path_db)
-        .env("HARNESS_DB", &legacy_db)
-        .output();
-
-    match output {
-        Ok(output) if output.status.success() && path_db.exists() && !legacy_db.exists() => {
-            Ok(DoctorCheck {
-                name: "HARNESS_DB_PATH",
-                status: CheckStatus::Pass,
-                detail: "harness-cli writes to HARNESS_DB_PATH".to_owned(),
-                next: None,
-            })
-        }
-        _ => Ok(DoctorCheck {
-            name: "HARNESS_DB_PATH",
-            status: CheckStatus::Fail,
-            detail: "harness-cli did not isolate writes to HARNESS_DB_PATH".to_owned(),
-            next: Some("Complete E04 US-028 or rebuild scripts/bin/harness-cli.".to_owned()),
-        }),
-    }
-}
-
-fn check_operation_log_support(config: &ResolvedConfig) -> Result<DoctorCheck, DoctorError> {
-    let temp_dir = tempfile::tempdir()?;
-    prepare_temp_schema(config, temp_dir.path())?;
-    let db = temp_dir.path().join("harness.db");
-    let cli = harness_cli_path(config);
-    let init = Command::new(&cli)
-        .arg("init")
-        .env("HARNESS_REPO_ROOT", temp_dir.path())
-        .env("HARNESS_DB_PATH", &db)
-        .output();
-    if !init.is_ok_and(|output| output.status.success()) {
-        return Ok(DoctorCheck {
-            name: "operation log",
-            status: CheckStatus::Fail,
-            detail: "could not initialize temp DB for operation-log probe".to_owned(),
-            next: Some("Run: scripts/bin/harness-cli init".to_owned()),
-        });
-    }
-
-    let run_id = "doctor_probe";
-    let output = Command::new(&cli)
-        .args([
-            "intake",
-            "--type",
-            "Harness improvement",
-            "--summary",
-            "Doctor operation log probe",
-            "--lane",
-            "tiny",
-        ])
-        .env("HARNESS_REPO_ROOT", temp_dir.path())
-        .env("HARNESS_DB_PATH", &db)
-        .env("HARNESS_RUN_ID", run_id)
-        .output();
-    let changeset = temp_dir
-        .path()
-        .join(".harness/changesets/doctor_probe.changeset.jsonl");
-
-    match output {
-        Ok(output) if output.status.success() && changeset.exists() => Ok(DoctorCheck {
-            name: "operation log",
-            status: CheckStatus::Pass,
-            detail: "harness-cli writes semantic changesets for HARNESS_RUN_ID".to_owned(),
-            next: None,
-        }),
-        _ => Ok(DoctorCheck {
-            name: "operation log",
-            status: CheckStatus::Fail,
-            detail: "harness-cli did not write an operation log".to_owned(),
-            next: Some("Complete E04 US-029 or rebuild scripts/bin/harness-cli.".to_owned()),
-        }),
+        next: Some("Use the configured Harness CLI executable with argv [\"init\"].".to_owned()),
     }
 }
 
@@ -394,33 +337,20 @@ fn check_pr_adapter(config: &ResolvedConfig) -> DoctorCheck {
     }
 }
 
-fn harness_cli_path(config: &ResolvedConfig) -> std::path::PathBuf {
-    config.repo_root.join("scripts/bin/harness-cli")
-}
-
-fn prepare_temp_schema(config: &ResolvedConfig, temp_root: &Path) -> Result<(), DoctorError> {
-    let source = config.repo_root.join("scripts/schema");
-    let target = temp_root.join("scripts/schema");
-    fs::create_dir_all(&target)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("sql") {
-            fs::copy(&path, target.join(entry.file_name()))?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn base_config() -> ResolvedConfig {
         ResolvedConfig {
             version: 1,
             repo_root: Path::new("/repo").to_path_buf(),
             harness_db: Path::new("/repo/harness.db").to_path_buf(),
+            harness_cli: None,
             state_db: Path::new("/repo/.symphony/state.db").to_path_buf(),
             runs_dir: Path::new("/repo/.harness/runs").to_path_buf(),
             worktrees_dir: Path::new("/repo/.symphony/worktrees").to_path_buf(),
@@ -484,5 +414,74 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Pass);
         assert!(check.detail.contains("codex app-server"));
+    }
+
+    #[test]
+    fn compatible_cli_reports_exact_contract_tuple() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = base_config();
+        config.repo_root = temp.path().to_path_buf();
+        config.harness_db = temp.path().join("harness.db");
+        let cli = temp.path().join("compatible harness cli");
+        write_contract_cli(&cli, "0.1.14", true);
+        config.harness_cli = Some(cli);
+
+        let check = check_harness_protocol(&config);
+
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert!(check.detail.contains("CLI 0.1.14"));
+        assert!(check.detail.contains("protocol 1, schema 13"));
+    }
+
+    #[test]
+    fn incompatible_cli_has_actionable_upgrade_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = base_config();
+        config.repo_root = temp.path().to_path_buf();
+        config.harness_db = temp.path().join("harness.db");
+        let cli = temp.path().join("old-cli");
+        write_contract_cli(&cli, "0.1.11", true);
+        config.harness_cli = Some(cli);
+
+        let check = check_harness_protocol(&config);
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("0.1.11"));
+        assert!(check.next.unwrap().contains("harness-cli-v0.1.14"));
+        assert!(!config.harness_db.exists());
+    }
+
+    #[test]
+    fn partial_capability_cli_names_missing_capability() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = base_config();
+        config.repo_root = temp.path().to_path_buf();
+        config.harness_db = temp.path().join("harness.db");
+        let cli = temp.path().join("partial-cli");
+        write_contract_cli(&cli, "0.1.14", false);
+        config.harness_cli = Some(cli);
+
+        let check = check_harness_protocol(&config);
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("stories.write.v1"));
+        assert!(check.next.unwrap().contains("harness-cli-v0.1.14"));
+    }
+
+    fn write_contract_cli(path: &Path, version: &str, complete: bool) {
+        let capabilities = if complete {
+            crate::harness_protocol::REQUIRED_CAPABILITIES.join("\",\"")
+        } else {
+            "stories.read.v1".to_owned()
+        };
+        fs::write(path, format!(r#"#!/bin/sh
+printf '%s\n' '{{"protocol_version":1,"operation":"query.contract","request_id":null,"result":{{"protocol_version":1,"cli_version":"{version}","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["{capabilities}"]}},"error":null}}'
+"#)).unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).unwrap();
+        }
     }
 }

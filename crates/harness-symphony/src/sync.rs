@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
 use crate::changeset::{changeset_files, changeset_id, ChangesetError};
 use crate::config::ResolvedConfig;
+use crate::harness_protocol::{HarnessProtocol, HarnessProtocolError};
 use crate::state::{RunStateStore, StateError};
 
 #[derive(Debug, Error)]
@@ -14,10 +14,10 @@ pub enum SyncError {
     Changeset(#[from] ChangesetError),
     #[error("{0}")]
     State(#[from] StateError),
-    #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    #[error("harness-cli failed for {path}: {stderr}")]
-    ApplyFailed { path: String, stderr: String },
+    #[error("{0}")]
+    Protocol(#[from] HarnessProtocolError),
+    #[error("Harness changeset response mismatch for {path}: {detail}")]
+    ResponseMismatch { path: String, detail: String },
     #[error("sync io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("git command failed: {0}")]
@@ -40,25 +40,37 @@ pub struct SyncResult {
 }
 
 pub fn sync_changesets(config: &ResolvedConfig) -> Result<SyncResult, SyncError> {
-    refresh_checkout_from_upstream(config)?;
+    let protocol = HarnessProtocol::from_config(config)?;
+    protocol.preflight()?;
     let store = RunStateStore::new(config.state_db.clone());
+    store.ensure_migration_fence_released()?;
+    refresh_checkout_from_upstream(config)?;
+    let protocol = HarnessProtocol::from_config(config)?;
+    protocol.preflight()?;
+    store.ensure_migration_fence_released()?;
     store.init()?;
     let paths = changeset_files(&config.changeset_directory)?;
     let mut changes = Vec::new();
     for path in paths {
-        changes.push(apply_changeset_path(config, &store, path)?);
+        changes.push(apply_changeset_path(&protocol, &store, path)?);
     }
     Ok(SyncResult { changes })
 }
 
 pub fn sync_changeset(config: &ResolvedConfig, run_id: &str) -> Result<SyncResult, SyncError> {
-    refresh_checkout_from_upstream(config)?;
+    let protocol = HarnessProtocol::from_config(config)?;
+    protocol.preflight()?;
     let store = RunStateStore::new(config.state_db.clone());
+    store.ensure_migration_fence_released()?;
+    refresh_checkout_from_upstream(config)?;
+    let protocol = HarnessProtocol::from_config(config)?;
+    protocol.preflight()?;
+    store.ensure_migration_fence_released()?;
     store.init()?;
     let path = config
         .changeset_directory
         .join(format!("{run_id}.changeset.jsonl"));
-    let change = apply_changeset_path(config, &store, path)?;
+    let change = apply_changeset_path(&protocol, &store, path)?;
     Ok(SyncResult {
         changes: vec![change],
     })
@@ -74,54 +86,38 @@ pub fn refresh_checkout_from_upstream(config: &ResolvedConfig) -> Result<bool, S
 }
 
 pub fn unapplied_changesets(config: &ResolvedConfig) -> Result<Vec<PathBuf>, SyncError> {
+    let protocol = HarnessProtocol::from_config(config)?;
+    protocol.preflight()?;
     let store = RunStateStore::new(config.state_db.clone());
     store.init()?;
     let mut unapplied = Vec::new();
     for path in changeset_files(&config.changeset_directory)? {
-        let id = changeset_id(&path)?;
-        if !harness_db_has_changeset(&config.harness_db, &id)? || !store.changeset_synced(&id)? {
+        let status = protocol.changeset_status(&path)?;
+        if !status.applied || !store.changeset_synced(&status.id, &status.content_sha256)? {
             unapplied.push(path);
         }
     }
     Ok(unapplied)
 }
 
-fn harness_db_has_changeset(db_path: &Path, id: &str) -> Result<bool, SyncError> {
-    if !db_path.exists() {
-        return Ok(false);
-    }
-    let connection = Connection::open(db_path)?;
-    let has_changeset_table = connection
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='changeset_applied';",
-            [],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if !has_changeset_table {
-        return Ok(false);
-    }
-    connection
-        .query_row(
-            "SELECT 1 FROM changeset_applied WHERE id=?1;",
-            params![id],
-            |_| Ok(()),
-        )
-        .optional()
-        .map(|value| value.is_some())
-        .map_err(SyncError::from)
-}
-
 fn apply_changeset_path(
-    config: &ResolvedConfig,
+    protocol: &HarnessProtocol,
     store: &RunStateStore,
     path: PathBuf,
 ) -> Result<SyncChange, SyncError> {
+    let guard = store.acquire_migration_fence_guard()?;
     let id = changeset_id(&path)?;
-    if harness_db_has_changeset(&config.harness_db, &id)? && store.changeset_synced(&id)? {
-        store.record_changeset_synced(&id, &path, true)?;
-        let _ = store.update_sync_status(&id, "synced", "done");
+    let status = protocol.changeset_status(&path)?;
+    if status.id != id {
+        return Err(SyncError::ResponseMismatch {
+            path: path.display().to_string(),
+            detail: format!("status returned id {} instead of {id}", status.id),
+        });
+    }
+    if status.applied {
+        guard.record_changeset_synced(&id, &path, &status.content_sha256, true)?;
+        guard.update_sync_status_if_present(&id, "synced", "done")?;
+        guard.commit()?;
         return Ok(SyncChange {
             id,
             path,
@@ -129,26 +125,25 @@ fn apply_changeset_path(
             operations: 0,
         });
     }
-    let output = Command::new(config.repo_root.join("scripts/bin/harness-cli"))
-        .args(["db", "changeset", "apply"])
-        .arg(&path)
-        .env("HARNESS_DB_PATH", &config.harness_db)
-        .current_dir(&config.repo_root)
-        .output()?;
-    if !output.status.success() {
-        return Err(SyncError::ApplyFailed {
+    let result = protocol.apply_changeset(&path)?;
+    if result.id != id {
+        return Err(SyncError::ResponseMismatch {
             path: path.display().to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            detail: format!("apply returned id {} instead of {id}", result.id),
         });
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let applied = stdout.contains(" applied ");
-    let durable_applied = applied || harness_db_has_changeset(&config.harness_db, &id)?;
-    let operations = parse_operations(&stdout);
-    store.record_changeset_synced(&id, &path, durable_applied)?;
-    if durable_applied {
-        let _ = store.update_sync_status(&id, "synced", "done");
+    let durable = protocol.changeset_status(&path)?;
+    if durable.id != id || !durable.applied || durable.content_sha256 != result.content_sha256 {
+        return Err(SyncError::ResponseMismatch {
+            path: path.display().to_string(),
+            detail: "post-apply status did not confirm the same applied content SHA".to_owned(),
+        });
     }
+    let durable_applied = true;
+    let operations = usize::try_from(result.operations).unwrap_or(usize::MAX);
+    guard.record_changeset_synced(&id, &path, &durable.content_sha256, durable_applied)?;
+    guard.update_sync_status_if_present(&id, "synced", "done")?;
+    guard.commit()?;
     Ok(SyncChange {
         id,
         path,
@@ -218,15 +213,6 @@ fn git_output(repo_root: &Path, args: &[&str]) -> Result<std::process::Output, S
         .map_err(SyncError::from)
 }
 
-fn parse_operations(stdout: &str) -> usize {
-    stdout
-        .split('(')
-        .nth(1)
-        .and_then(|value| value.split_whitespace().next())
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,142 +221,7 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    fn parses_operation_count_from_cli_output() {
-        assert_eq!(
-            parse_operations("Changeset run_1 applied (3 operation(s))."),
-            3
-        );
-        assert_eq!(
-            parse_operations("Changeset run_1 already applied; skipped."),
-            0
-        );
-    }
-
-    #[test]
-    fn missing_changeset_applied_table_is_treated_as_unapplied() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("harness.db");
-        Connection::open(&db_path).unwrap();
-
-        let has_changeset = harness_db_has_changeset(&db_path, "run_old").unwrap();
-
-        assert!(!has_changeset);
-    }
-
-    #[test]
-    fn already_applied_changeset_marks_run_synced() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config = config_for_root(temp_dir.path());
-        fs::create_dir_all(&config.changeset_directory).unwrap();
-        fs::create_dir_all(temp_dir.path().join("scripts/bin")).unwrap();
-        fs::write(
-            config.changeset_directory.join("run_done.changeset.jsonl"),
-            r#"{"op":"changeset.header","version":1,"run_id":"run_done"}
-{"op":"story.update","version":1,"id":"US-DONE","payload":{"status":"implemented"}}
-"#,
-        )
-        .unwrap();
-        let connection = Connection::open(&config.harness_db).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE changeset_applied (
-                    id TEXT PRIMARY KEY,
-                    path TEXT,
-                    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-                INSERT INTO changeset_applied (id, path)
-                VALUES ('run_done', '.harness/changesets/run_done.changeset.jsonl');",
-            )
-            .unwrap();
-        let cli_path = temp_dir.path().join("scripts/bin/harness-cli");
-        fs::write(
-            &cli_path,
-            "#!/bin/sh\necho 'Changeset run_done already applied; skipped.'\n",
-        )
-        .unwrap();
-        make_executable(&cli_path);
-        let store = RunStateStore::new(config.state_db.clone());
-        store
-            .add_run(crate::state::NewRunRecord {
-                run_id: "run_done".to_owned(),
-                story_id: "US-DONE".to_owned(),
-                branch: Some("symphony/run_done".to_owned()),
-                worktree: temp_dir.path().join("worktree"),
-                lightweight: false,
-                status: "completed".to_owned(),
-                result_path: Some(PathBuf::from(".harness/runs/run_done/RESULT.json")),
-                sync_status: "not_applied".to_owned(),
-                next_action: "approve sync".to_owned(),
-            })
-            .unwrap();
-
-        let result = sync_changeset(&config, "run_done").unwrap();
-        let run = store.show_run("run_done").unwrap();
-
-        assert!(result.changes[0].applied);
-        assert_eq!(result.changes[0].operations, 0);
-        assert!(store.changeset_synced("run_done").unwrap());
-        assert_eq!(run.sync_status, "synced");
-        assert_eq!(run.next_action, "done");
-    }
-
-    #[test]
-    fn already_synced_changeset_heals_unsynced_run_state() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config = config_for_root(temp_dir.path());
-        fs::create_dir_all(&config.changeset_directory).unwrap();
-        fs::write(
-            config.changeset_directory.join("run_heal.changeset.jsonl"),
-            r#"{"op":"changeset.header","version":1,"run_id":"run_heal"}
-{"op":"story.update","version":1,"id":"US-HEAL","payload":{"status":"implemented"}}
-"#,
-        )
-        .unwrap();
-        let connection = Connection::open(&config.harness_db).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE changeset_applied (
-                    id TEXT PRIMARY KEY,
-                    path TEXT,
-                    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-                INSERT INTO changeset_applied (id, path)
-                VALUES ('run_heal', '.harness/changesets/run_heal.changeset.jsonl');",
-            )
-            .unwrap();
-        let store = RunStateStore::new(config.state_db.clone());
-        store
-            .add_run(crate::state::NewRunRecord {
-                run_id: "run_heal".to_owned(),
-                story_id: "US-HEAL".to_owned(),
-                branch: Some("symphony/run_heal".to_owned()),
-                worktree: temp_dir.path().join("worktree"),
-                lightweight: false,
-                status: "completed".to_owned(),
-                result_path: Some(PathBuf::from(".harness/runs/run_heal/RESULT.json")),
-                sync_status: "not_applied".to_owned(),
-                next_action: "approve sync".to_owned(),
-            })
-            .unwrap();
-        store
-            .record_changeset_synced(
-                "run_heal",
-                std::path::Path::new(".harness/changesets/run_heal.changeset.jsonl"),
-                false,
-            )
-            .unwrap();
-
-        let result = sync_changeset(&config, "run_heal").unwrap();
-        let run = store.show_run("run_heal").unwrap();
-
-        assert!(result.changes[0].applied);
-        assert_eq!(result.changes[0].operations, 0);
-        assert_eq!(run.sync_status, "synced");
-        assert_eq!(run.next_action, "done");
-    }
-
-    #[test]
-    fn sync_changeset_applies_only_requested_run() {
+    fn compatible_json_cli_applies_only_requested_run() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = config_for_root(temp_dir.path());
         fs::create_dir_all(&config.changeset_directory).unwrap();
@@ -390,11 +241,7 @@ mod tests {
         )
         .unwrap();
         let cli_path = temp_dir.path().join("scripts/bin/harness-cli");
-        fs::write(
-            &cli_path,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> sync-args.log\necho 'Changeset run_one applied (2 operation(s)).'\n",
-        )
-        .unwrap();
+        write_fake_cli(&cli_path, true);
         make_executable(&cli_path);
 
         let result = sync_changeset(&config, "run_one").unwrap();
@@ -405,6 +252,90 @@ mod tests {
         let args = fs::read_to_string(temp_dir.path().join("sync-args.log")).unwrap();
         assert!(args.contains(".harness/changesets/run_one.changeset.jsonl"));
         assert!(!args.contains("run_two.changeset.jsonl"));
+    }
+
+    #[test]
+    fn incompatible_cli_fails_before_state_store_write() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        fs::create_dir_all(&config.changeset_directory).unwrap();
+        fs::create_dir_all(temp_dir.path().join("scripts/bin")).unwrap();
+        fs::write(
+            config.changeset_directory.join("run_old.changeset.jsonl"),
+            "{\"op\":\"changeset.header\",\"version\":1,\"run_id\":\"run_old\"}\n",
+        )
+        .unwrap();
+        write_fake_cli(&temp_dir.path().join("scripts/bin/harness-cli"), false);
+
+        let error = sync_changeset(&config, "run_old").unwrap_err();
+
+        assert!(
+            matches!(error, SyncError::Protocol(HarnessProtocolError::UnsupportedCliVersion { actual }) if actual == "0.1.11")
+        );
+        assert!(!config.state_db.exists());
+    }
+
+    #[test]
+    fn migration_fence_rejects_sync_before_changeset_status_or_apply() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        fs::create_dir_all(&config.changeset_directory).unwrap();
+        fs::create_dir_all(temp_dir.path().join("scripts/bin")).unwrap();
+        fs::write(
+            config
+                .changeset_directory
+                .join("run_fenced.changeset.jsonl"),
+            "{\"op\":\"changeset.header\",\"version\":1,\"run_id\":\"run_fenced\"}\n",
+        )
+        .unwrap();
+        write_fake_cli(&temp_dir.path().join("scripts/bin/harness-cli"), true);
+        RunStateStore::new(config.state_db.clone())
+            .hold_migration_fence("ownership handoff")
+            .unwrap();
+
+        let error = sync_changeset(&config, "run_fenced").unwrap_err();
+
+        assert!(matches!(
+            error,
+            SyncError::State(StateError::MigrationFenceHeld(reason))
+                if reason == "ownership handoff"
+        ));
+        let args = fs::read_to_string(temp_dir.path().join("sync-args.log")).unwrap();
+        assert!(args.contains("query\ncontract\n--json"));
+        assert!(!args.contains("status"));
+        assert!(!args.contains("apply"));
+    }
+
+    #[test]
+    fn applied_same_id_with_different_content_sha_fails_closed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        fs::create_dir_all(&config.changeset_directory).unwrap();
+        fs::create_dir_all(temp_dir.path().join("scripts/bin")).unwrap();
+        let path = config.changeset_directory.join("run_same.changeset.jsonl");
+        fs::write(
+            &path,
+            "{\"op\":\"changeset.header\",\"version\":1,\"run_id\":\"run_same\"}\n",
+        )
+        .unwrap();
+        write_fake_cli(&temp_dir.path().join("scripts/bin/harness-cli"), true);
+        fs::write(temp_dir.path().join(".applied-run_same"), "").unwrap();
+        RunStateStore::new(config.state_db.clone())
+            .record_changeset_synced(
+                "run_same",
+                &path,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                true,
+            )
+            .unwrap();
+
+        let error = sync_changeset(&config, "run_same").unwrap_err();
+
+        assert!(matches!(
+            error,
+            SyncError::State(StateError::ChangesetContentConflict { id, .. })
+                if id == "run_same"
+        ));
     }
 
     #[test]
@@ -635,6 +566,29 @@ mod tests {
         );
     }
 
+    fn write_fake_cli(path: &Path, compatible: bool) {
+        let version = if compatible { "0.1.14" } else { "0.1.11" };
+        let script = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" >> sync-args.log
+if [ "$1 $2 $3" = "query contract --json" ]; then
+  printf '%s\n' '{{"protocol_version":1,"operation":"query.contract","request_id":null,"result":{{"protocol_version":1,"cli_version":"{version}","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]}},"error":null}}'
+elif [ "$3" = "status" ]; then
+  id=$(basename "$4" .changeset.jsonl)
+  applied=false
+  [ -f ".applied-$id" ] && applied=true
+  printf '%s\n' "{{\"protocol_version\":1,\"operation\":\"db.changeset.status\",\"request_id\":null,\"result\":{{\"id\":\"$id\",\"content_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"applied\":$applied,\"operation_count\":2}},\"error\":null}}"
+elif [ "$3" = "apply" ]; then
+  id=$(basename "$4" .changeset.jsonl)
+  : > ".applied-$id"
+  printf '%s\n' "{{\"protocol_version\":1,\"operation\":\"db.changeset.apply\",\"request_id\":null,\"result\":{{\"id\":\"$id\",\"content_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"applied\":true,\"operations\":2}},\"error\":null}}"
+fi
+"#
+        );
+        fs::write(path, script).unwrap();
+        make_executable(path);
+    }
+
     #[cfg(unix)]
     fn make_executable(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
@@ -651,6 +605,7 @@ mod tests {
             version: 1,
             repo_root: root.to_path_buf(),
             harness_db: root.join("harness.db"),
+            harness_cli: None,
             state_db: root.join(".symphony/state.db"),
             runs_dir: root.join(".harness/runs"),
             worktrees_dir: root.join(".symphony/worktrees"),
