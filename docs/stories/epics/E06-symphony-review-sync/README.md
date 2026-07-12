@@ -1,5 +1,9 @@
 # E06 Symphony Review And Sync
 
+> Historical import: this delivered-epic summary was imported from
+> `repository-harness` and is evidence, not an active target work queue. See
+> [`../../../history/README.md`](../../../history/README.md).
+
 ## Goal
 
 Turn local runs into reviewable PR evidence and make merged changesets

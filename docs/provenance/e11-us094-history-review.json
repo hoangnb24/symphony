@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "story_id": "US-094",
+  "reviewed_at": "2026-07-12",
+  "source_repository": "repository-harness",
+  "source_commit": "c9a64668d2723ecc1de4779a5df8e214493b5f6f",
+  "durable_state_mutated": false,
+  "history": {
+    "retired": ["US-061", "US-063"],
+    "implemented_with_stale_packets": ["US-065", "US-066"],
+    "implemented_with_evidence_caveat": ["US-046"]
+  },
+  "backlog_dispositions_for_us097": [
+    {"source_id": 10, "disposition": "carry-forward-unresolved"},
+    {"source_id": 11, "disposition": "conditional-carry-forward-after-identity-review"},
+    {"source_id": 12, "disposition": "do-not-import-as-prerequisite"},
+    {"source_id": 14, "disposition": "close-or-supersede-with-us093-evidence"}
+  ],
+  "archive": [
+    {
+      "source_path": ".codex/skills/harness-intake-griller/SKILL.md",
+      "target_path": "docs/archive/extensions/harness-intake-griller/SKILL.md",
+      "sha256": "ed53843760e8500477bae1c0a7867d62bd45e661c4382cd93ee07d197116628c"
+    },
+    {
+      "source_path": ".codex/skills/harness-intake-griller/agents/openai.yaml",
+      "target_path": "docs/archive/extensions/harness-intake-griller/agents/openai.yaml",
+      "sha256": "f2d9006295f6a82e76ea87983a25c73264af0582a7e757ea8749638f1f0af8a1"
+    }
+  ],
+  "archive_executable": false,
+  "archive_prerequisite": false
+}

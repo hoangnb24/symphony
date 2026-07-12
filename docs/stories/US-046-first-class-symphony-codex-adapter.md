@@ -1,5 +1,10 @@
 # US-046 First-Class Symphony Codex Adapter
 
+> Historical import: implemented evidence with a retained caveat. Unit and
+> integration proof was recorded, but the source packet did not claim the full
+> live terminal-event E2E proof. See
+> [`../history/README.md`](../history/README.md).
+
 ## Status
 
 implemented
