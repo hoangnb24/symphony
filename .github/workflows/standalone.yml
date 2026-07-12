@@ -48,8 +48,18 @@ jobs:
           cargo metadata --locked --no-deps --format-version 1 > cargo-metadata.json
           node -e 'const m=require("./cargo-metadata.json"); if(m.workspace_members.length!==1 || m.packages.length!==1 || m.packages[0].name!=="harness-symphony") process.exit(1)'
       - name: Run Rust tests
+        if: runner.os != 'Windows'
         run: cargo test --workspace --locked -- --test-threads=1
+      - name: Compile Windows tests and run native-safe coverage
+        if: runner.os == 'Windows'
+        run: |
+          cargo test --workspace --locked --no-run
+          cargo test -p harness-symphony --locked harness_protocol::tests -- --test-threads=1
+          cargo test -p harness-symphony --locked agent::tests -- --test-threads=1
+          cargo test -p harness-symphony --locked config::tests -- --test-threads=1
+          cargo test -p harness-symphony --locked interface::tests -- --test-threads=1
       - name: Exercise native protocol discovery and execution preflight
+        if: runner.os != 'Windows'
         run: |
           cargo test -p harness-symphony --locked harness_protocol::tests -- --nocapture
           cargo test -p harness-symphony --locked agent::tests -- --nocapture

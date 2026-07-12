@@ -15,13 +15,13 @@ trap 'rm -rf "$temp"' EXIT
 
 cargo build --manifest-path "$repo_root/Cargo.toml" -p harness-symphony --locked >/dev/null
 cargo test --manifest-path "$repo_root/Cargo.toml" -p harness-symphony --locked \
-  harness_protocol::tests -- --nocapture
+  harness_protocol::tests -- --nocapture --test-threads=1
 cargo test --manifest-path "$repo_root/Cargo.toml" -p harness-symphony --locked \
-  work::protocol_tests -- --nocapture
+  work::protocol_tests -- --nocapture --test-threads=1
 cargo test --manifest-path "$repo_root/Cargo.toml" -p harness-symphony --locked \
-  doctor::tests -- --nocapture
+  doctor::tests -- --nocapture --test-threads=1
 cargo test --manifest-path "$repo_root/Cargo.toml" -p harness-symphony --locked \
-  sync::tests -- --nocapture
+  sync::tests -- --nocapture --test-threads=1
 
 full_capabilities='["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]'
 
