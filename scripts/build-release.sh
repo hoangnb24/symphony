@@ -51,7 +51,12 @@ find "$stage" -exec touch -t "$touch_stamp" {} +
 base="harness-symphony-$version-$label"
 archive="$dist/$base.tar.gz"
 (cd "$stage" && find . -type f -print | LC_ALL=C sort >"$work/files")
-COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root -C "$stage" -cf - -T "$work/files" | gzip -n -9 >"$archive"
+if tar --version 2>/dev/null | head -1 | grep -q 'GNU tar'; then
+  tar_ownership=(--owner=0 --group=0 --numeric-owner)
+else
+  tar_ownership=(--uid 0 --gid 0 --uname root --gname root)
+fi
+COPYFILE_DISABLE=1 tar --format ustar "${tar_ownership[@]}" -C "$stage" -cf - -T "$work/files" | gzip -n -9 >"$archive"
 hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
 archive_sha=$(hash_file "$archive")
 printf '%s  %s\n' "$archive_sha" "$(basename "$archive")" >"$archive.sha256"

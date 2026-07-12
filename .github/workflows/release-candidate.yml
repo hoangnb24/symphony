@@ -73,6 +73,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes jq ripgrep sqlite3
+      - name: Install macOS compatibility dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install ripgrep
       - name: Run native Rust gates
         run: |
           cargo fmt --check
