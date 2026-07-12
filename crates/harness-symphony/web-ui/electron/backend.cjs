@@ -1,7 +1,20 @@
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
+
+const REQUIRED_CAPABILITIES = [
+  "changesets.apply.v1",
+  "changesets.status-sha.v1",
+  "isolated-db-snapshot.v1",
+  "isolated-db.v1",
+  "semantic-operation-log.v1",
+  "stories.read.v1",
+  "stories.write.v1",
+  "story-dependencies.read-write.v1",
+  "story-hierarchy.read-write.v1",
+  "work-graph.read.v1"
+];
 
 function repoRootFromElectronDir() {
   return path.resolve(__dirname, "../../../..");
@@ -11,12 +24,86 @@ function looksLikeRepoRoot(candidate) {
   if (!candidate) {
     return false;
   }
-  const hasSymphonySource = fs.existsSync(
-    path.join(candidate, "crates", "harness-symphony", "Cargo.toml")
-  );
-  const hasStandaloneWorkspace = fs.existsSync(path.join(candidate, "Cargo.toml"));
+  const configPath = path.join(candidate, ".harness", "symphony.yml");
+  const hasSymphonyConfig = fs.existsSync(configPath);
   const hasHarnessDatabase = fs.existsSync(path.join(candidate, "harness.db"));
-  return hasSymphonySource && (hasStandaloneWorkspace || hasHarnessDatabase);
+  let configText = "";
+  let configuredCli;
+  if (hasSymphonyConfig) {
+    configText = fs.readFileSync(configPath, "utf8");
+    const match = configText.match(/^\s*harness_cli:\s*["']?([^\n"']+)["']?\s*$/m);
+    configuredCli = match && match[1].trim();
+  }
+  const cliValue = configuredCli || process.env.HARNESS_CLI_PATH;
+  const harnessCli = cliValue
+    ? path.resolve(candidate, cliValue)
+    : path.join(
+        candidate,
+        "scripts",
+        "bin",
+        process.platform === "win32" ? "harness-cli.exe" : "harness-cli"
+      );
+  const configVersion = configText.match(/^\s*version:\s*(\d+)\s*$/m);
+  return (
+    hasSymphonyConfig &&
+    configVersion &&
+    configVersion[1] === "1" &&
+    hasHarnessDatabase &&
+    fs.existsSync(harnessCli) &&
+    compatibleHarnessContract(candidate, harnessCli)
+  );
+}
+
+function compatibleHarnessContract(repoRoot, harnessCli) {
+  const result = spawnSync(harnessCli, ["query", "contract", "--json"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      HARNESS_REPO_ROOT: repoRoot,
+      HARNESS_DB_PATH: path.join(repoRoot, "harness.db")
+    },
+    encoding: "utf8",
+    timeout: 10000,
+    windowsHide: true
+  });
+  if (result.error || result.status !== 0) {
+    return false;
+  }
+  let envelope;
+  try {
+    envelope = JSON.parse(result.stdout);
+  } catch {
+    return false;
+  }
+  const contract = envelope && envelope.operation === "query.contract" && envelope.result;
+  if (
+    !contract ||
+    envelope.protocol_version !== 1 ||
+    contract.protocol_version !== 1 ||
+    contract.cli_version !== "0.1.14" ||
+    contract.database_state !== "current" ||
+    ![12, 13].includes(contract.database_schema_version) ||
+    contract.schema_minimum !== 1 ||
+    contract.schema_maximum !== 13 ||
+    !Array.isArray(contract.required_environment_variables) ||
+    !contract.required_environment_variables.includes("HARNESS_DB_PATH") ||
+    !Array.isArray(contract.capabilities)
+  ) {
+    return false;
+  }
+  return REQUIRED_CAPABILITIES.every((capability) => contract.capabilities.includes(capability));
+}
+
+function repoRootArgument(argv = process.argv.slice(1)) {
+  const index = argv.indexOf("--repo-root");
+  if (index === -1) {
+    return undefined;
+  }
+  const value = argv[index + 1];
+  if (!value || value.startsWith("--")) {
+    throw new Error("--repo-root requires a directory path");
+  }
+  return value;
 }
 
 function ancestors(startPath) {
@@ -33,10 +120,12 @@ function ancestors(startPath) {
 }
 
 function findRepoRoot(options = {}) {
-  const explicit = options.envRepoRoot || process.env.SYMPHONY_REPO_ROOT;
+  const explicit = options.repoRoot || options.envRepoRoot || process.env.SYMPHONY_REPO_ROOT;
   if (explicit) {
     if (!looksLikeRepoRoot(explicit)) {
-      throw new Error(`SYMPHONY_REPO_ROOT does not look like a Symphony repo: ${explicit}`);
+      throw new Error(
+        `Selected repository does not contain Symphony config and a compatible Harness CLI/database contract: ${explicit}`
+      );
     }
     return path.resolve(explicit);
   }
@@ -56,7 +145,7 @@ function findRepoRoot(options = {}) {
   }
 
   throw new Error(
-    "Could not find a Symphony repo root. Launch the app from the repository or set SYMPHONY_REPO_ROOT."
+    "Could not find a Harness project configured for Symphony. Pass --repo-root or set SYMPHONY_REPO_ROOT."
   );
 }
 
@@ -136,7 +225,7 @@ function startBackend(options) {
       cwd: repoRoot,
       env: {
         ...process.env,
-        HARNESS_SYMPHONY_WEB_DIST_DIR: assetDir
+        ...(assetDir ? { HARNESS_SYMPHONY_WEB_DIST_DIR: assetDir } : {})
       },
       stdio: ["ignore", "pipe", "pipe"]
     }
@@ -188,19 +277,33 @@ function startBackend(options) {
       return `${url}/health`;
     },
     stop() {
-      if (!child.killed) {
-        child.kill();
+      if (child.exitCode !== null) {
+        return Promise.resolve();
       }
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          reject(new Error("Harness Symphony backend did not stop within 5 seconds"));
+        }, 5000);
+        child.once("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        child.kill();
+      });
     }
   };
 }
 
 module.exports = {
   assertExecutable,
+  compatibleHarnessContract,
   developmentBackendBinary,
   findRepoRoot,
+  looksLikeRepoRoot,
   packagedBackendBinary,
   repoRootFromElectronDir,
+  repoRootArgument,
   requestText,
   startBackend,
   waitForHttp

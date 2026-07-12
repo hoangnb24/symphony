@@ -4,6 +4,8 @@ const {
   developmentBackendBinary,
   findRepoRoot,
   packagedBackendBinary,
+  repoRootArgument,
+  repoRootFromElectronDir,
   startBackend,
   waitForHttp
 } = require("./backend.cjs");
@@ -13,6 +15,7 @@ let backend = null;
 
 function desktopPaths() {
   const repoRoot = findRepoRoot({
+    repoRoot: repoRootArgument(),
     electronDir: __dirname,
     resourcesPath: process.resourcesPath,
     cwd: process.cwd()
@@ -29,8 +32,9 @@ function desktopPaths() {
 
   return {
     repoRoot,
-    binary: process.env.SYMPHONY_BACKEND_BINARY || developmentBackendBinary(repoRoot),
-    assetDir: path.join(repoRoot, "crates", "harness-symphony", "web-ui", "dist"),
+    binary:
+      process.env.SYMPHONY_BACKEND_BINARY || developmentBackendBinary(repoRootFromElectronDir()),
+    assetDir: path.resolve(__dirname, "..", "dist"),
     port: Number(process.env.SYMPHONY_BACKEND_PORT || "4317"),
     loadVite: true
   };

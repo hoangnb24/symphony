@@ -1345,17 +1345,37 @@ fn static_response(config: &ResolvedConfig, request_path: &str) -> Result<HttpRe
 }
 
 fn web_dist_dir(config: &ResolvedConfig) -> PathBuf {
-    web_dist_dir_with_override(config, std::env::var_os(WEB_DIST_DIR_ENV))
+    web_dist_dir_with_paths(
+        config,
+        std::env::var_os(WEB_DIST_DIR_ENV),
+        std::env::current_exe().ok().as_deref(),
+    )
 }
 
+#[cfg(test)]
 fn web_dist_dir_with_override(
     config: &ResolvedConfig,
     override_path: Option<std::ffi::OsString>,
+) -> PathBuf {
+    web_dist_dir_with_paths(config, override_path, None)
+}
+
+fn web_dist_dir_with_paths(
+    config: &ResolvedConfig,
+    override_path: Option<std::ffi::OsString>,
+    executable: Option<&Path>,
 ) -> PathBuf {
     if let Some(path) = override_path {
         if !path.is_empty() {
             return PathBuf::from(path);
         }
+    }
+    if let Some(bundle_dist) = executable
+        .and_then(Path::parent)
+        .map(|directory| directory.join("web-ui-dist"))
+        .filter(|directory| directory.is_dir())
+    {
+        return bundle_dist;
     }
     config
         .repo_root
@@ -2450,6 +2470,38 @@ esac
         let dist = web_dist_dir_with_override(&config, Some(override_dir.clone().into_os_string()));
 
         assert_eq!(dist, override_dir);
+    }
+
+    #[test]
+    fn web_dist_dir_uses_assets_beside_standalone_executable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        let bundle = temp_dir.path().join("third-directory");
+        let dist = bundle.join("web-ui-dist");
+        fs::create_dir_all(&dist).unwrap();
+        let executable = bundle.join(if cfg!(windows) {
+            "harness-symphony.exe"
+        } else {
+            "harness-symphony"
+        });
+
+        let selected = web_dist_dir_with_paths(&config, None, Some(&executable));
+
+        assert_eq!(selected, dist);
+    }
+
+    #[test]
+    fn web_dist_dir_falls_back_to_development_tree_when_bundle_assets_are_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        let executable = temp_dir.path().join("bundle/harness-symphony");
+
+        let selected = web_dist_dir_with_paths(&config, None, Some(&executable));
+
+        assert_eq!(
+            selected,
+            config.repo_root.join("crates/harness-symphony/web-ui/dist")
+        );
     }
 
     #[test]
