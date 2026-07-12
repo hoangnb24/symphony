@@ -48,7 +48,7 @@ jobs:
           cargo metadata --locked --no-deps --format-version 1 > cargo-metadata.json
           node -e 'const m=require("./cargo-metadata.json"); if(m.workspace_members.length!==1 || m.packages.length!==1 || m.packages[0].name!=="harness-symphony") process.exit(1)'
       - name: Run Rust tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=1
       - name: Exercise native protocol discovery and execution preflight
         run: |
           cargo test -p harness-symphony --locked harness_protocol::tests -- --nocapture
