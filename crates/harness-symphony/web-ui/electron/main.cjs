@@ -24,7 +24,10 @@ function desktopPaths() {
     return {
       repoRoot,
       binary: packagedBackendBinary(),
-      assetDir: path.join(process.resourcesPath, "web-ui-dist"),
+      // Let the packaged backend validate the shared resource manifest and
+      // resolve ../share/harness-symphony/web-ui from its bin/ location.
+      assetDir: undefined,
+      clearAssetOverride: true,
       port: 0,
       loadVite: false
     };

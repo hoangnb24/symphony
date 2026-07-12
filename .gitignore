@@ -9,6 +9,7 @@ Thumbs.db
 node_modules/
 dist/
 desktop-dist/
+desktop-resources/
 test-results/
 playwright-report/
 blob-report/

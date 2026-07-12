@@ -45,9 +45,7 @@ function looksLikeRepoRoot(candidate) {
       );
   const configVersion = configText.match(/^\s*version:\s*(\d+)\s*$/m);
   return (
-    hasSymphonyConfig &&
-    configVersion &&
-    configVersion[1] === "1" &&
+    (!hasSymphonyConfig || (configVersion && configVersion[1] === "1")) &&
     hasHarnessDatabase &&
     fs.existsSync(harnessCli) &&
     compatibleHarnessContract(candidate, harnessCli)
@@ -124,7 +122,7 @@ function findRepoRoot(options = {}) {
   if (explicit) {
     if (!looksLikeRepoRoot(explicit)) {
       throw new Error(
-        `Selected repository does not contain Symphony config and a compatible Harness CLI/database contract: ${explicit}`
+        `Selected repository does not provide a compatible Harness CLI/database contract: ${explicit}`
       );
     }
     return path.resolve(explicit);
@@ -217,16 +215,19 @@ function startBackend(options) {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 0;
   assertExecutable(binary);
+  const environment = { ...process.env };
+  if (options.clearAssetOverride) {
+    delete environment.HARNESS_SYMPHONY_WEB_DIST_DIR;
+  } else if (assetDir) {
+    environment.HARNESS_SYMPHONY_WEB_DIST_DIR = assetDir;
+  }
 
   const child = spawn(
     binary,
     ["--repo-root", repoRoot, "web", "--host", host, "--port", String(port)],
     {
       cwd: repoRoot,
-      env: {
-        ...process.env,
-        ...(assetDir ? { HARNESS_SYMPHONY_WEB_DIST_DIR: assetDir } : {})
-      },
+      env: environment,
       stdio: ["ignore", "pipe", "pipe"]
     }
   );

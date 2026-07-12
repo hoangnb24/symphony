@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -38,6 +38,8 @@ pub enum WebError {
     Json(#[from] serde_json::Error),
     #[error("requested web asset is outside the web UI dist directory")]
     InvalidAssetPath,
+    #[error("invalid packaged resource manifest at {path}: {detail}")]
+    InvalidResourceManifest { path: String, detail: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1305,7 +1307,7 @@ fn json_response<T: Serialize>(status: u16, body: &T) -> Result<HttpResponse, We
 }
 
 fn static_response(config: &ResolvedConfig, request_path: &str) -> Result<HttpResponse, WebError> {
-    let dist_dir = web_dist_dir(config);
+    let dist_dir = web_dist_dir(config)?;
     if !dist_dir.exists() {
         if request_path != "/" {
             return json_response(
@@ -1344,7 +1346,15 @@ fn static_response(config: &ResolvedConfig, request_path: &str) -> Result<HttpRe
     Ok(HttpResponse::new(response))
 }
 
-fn web_dist_dir(config: &ResolvedConfig) -> PathBuf {
+#[derive(Debug, Deserialize)]
+struct ResourceManifest {
+    format_version: u32,
+    binary_path: String,
+    web_asset_root: String,
+    web_asset_sha256: String,
+}
+
+fn web_dist_dir(config: &ResolvedConfig) -> Result<PathBuf, WebError> {
     web_dist_dir_with_paths(
         config,
         std::env::var_os(WEB_DIST_DIR_ENV),
@@ -1356,7 +1366,7 @@ fn web_dist_dir(config: &ResolvedConfig) -> PathBuf {
 fn web_dist_dir_with_override(
     config: &ResolvedConfig,
     override_path: Option<std::ffi::OsString>,
-) -> PathBuf {
+) -> Result<PathBuf, WebError> {
     web_dist_dir_with_paths(config, override_path, None)
 }
 
@@ -1364,10 +1374,18 @@ fn web_dist_dir_with_paths(
     config: &ResolvedConfig,
     override_path: Option<std::ffi::OsString>,
     executable: Option<&Path>,
-) -> PathBuf {
+) -> Result<PathBuf, WebError> {
     if let Some(path) = override_path {
         if !path.is_empty() {
-            return PathBuf::from(path);
+            return Ok(PathBuf::from(path));
+        }
+    }
+    if let Some(executable) = executable {
+        if let Some(archive_root) = executable.parent().and_then(Path::parent) {
+            let resource_root = archive_root.join("share/harness-symphony");
+            if resource_root.exists() {
+                return packaged_web_dist(&resource_root, executable, archive_root);
+            }
         }
     }
     if let Some(bundle_dist) = executable
@@ -1375,14 +1393,65 @@ fn web_dist_dir_with_paths(
         .map(|directory| directory.join("web-ui-dist"))
         .filter(|directory| directory.is_dir())
     {
-        return bundle_dist;
+        return Ok(bundle_dist);
     }
-    config
+    Ok(config
         .repo_root
         .join("crates")
         .join("harness-symphony")
         .join("web-ui")
-        .join("dist")
+        .join("dist"))
+}
+
+fn packaged_web_dist(
+    resource_root: &Path,
+    executable: &Path,
+    archive_root: &Path,
+) -> Result<PathBuf, WebError> {
+    let manifest_path = resource_root.join("resource-manifest.json");
+    let invalid = |detail: String| WebError::InvalidResourceManifest {
+        path: manifest_path.display().to_string(),
+        detail,
+    };
+    let bytes = fs::read(&manifest_path).map_err(|error| invalid(error.to_string()))?;
+    let manifest: ResourceManifest =
+        serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
+    let expected_binary = executable
+        .strip_prefix(archive_root)
+        .map_err(|_| invalid("backend binary is outside the archive root".to_owned()))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if manifest.format_version != 1 {
+        return Err(invalid("format_version must be 1".to_owned()));
+    }
+    if manifest.binary_path != expected_binary {
+        return Err(invalid(format!(
+            "binary_path must be {expected_binary}, got {}",
+            manifest.binary_path
+        )));
+    }
+    if manifest.web_asset_root != "share/harness-symphony/web-ui" {
+        return Err(invalid(
+            "web_asset_root must be share/harness-symphony/web-ui".to_owned(),
+        ));
+    }
+    if manifest.web_asset_sha256.len() != 64
+        || !manifest
+            .web_asset_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(invalid(
+            "web_asset_sha256 must be a 64-character SHA-256".to_owned(),
+        ));
+    }
+    let dist = archive_root.join(&manifest.web_asset_root);
+    if !dist.join("index.html").is_file() {
+        return Err(invalid(
+            "Web asset root does not contain index.html".to_owned(),
+        ));
+    }
+    Ok(dist)
 }
 
 fn resolve_asset_path(dist_dir: &Path, request_path: &str) -> Result<PathBuf, WebError> {
@@ -2433,7 +2502,7 @@ esac
     fn root_serves_built_web_ui_index() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = test_config(&temp_dir);
-        let dist = web_dist_dir(&config);
+        let dist = web_dist_dir(&config).unwrap();
         fs::create_dir_all(&dist).unwrap();
         fs::write(dist.join("index.html"), "<div id=\"root\"></div>").unwrap();
 
@@ -2448,7 +2517,7 @@ esac
     fn static_assets_are_served_as_raw_bytes() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = test_config(&temp_dir);
-        let dist = web_dist_dir(&config);
+        let dist = web_dist_dir(&config).unwrap();
         fs::create_dir_all(&dist).unwrap();
         let asset = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00];
         fs::write(dist.join("icon.png"), asset).unwrap();
@@ -2467,7 +2536,8 @@ esac
         let config = test_config(&temp_dir);
         let override_dir = temp_dir.path().join("packaged-web-ui-dist");
 
-        let dist = web_dist_dir_with_override(&config, Some(override_dir.clone().into_os_string()));
+        let dist = web_dist_dir_with_override(&config, Some(override_dir.clone().into_os_string()))
+            .unwrap();
 
         assert_eq!(dist, override_dir);
     }
@@ -2485,7 +2555,7 @@ esac
             "harness-symphony"
         });
 
-        let selected = web_dist_dir_with_paths(&config, None, Some(&executable));
+        let selected = web_dist_dir_with_paths(&config, None, Some(&executable)).unwrap();
 
         assert_eq!(selected, dist);
     }
@@ -2496,12 +2566,56 @@ esac
         let config = test_config(&temp_dir);
         let executable = temp_dir.path().join("bundle/harness-symphony");
 
-        let selected = web_dist_dir_with_paths(&config, None, Some(&executable));
+        let selected = web_dist_dir_with_paths(&config, None, Some(&executable)).unwrap();
 
         assert_eq!(
             selected,
             config.repo_root.join("crates/harness-symphony/web-ui/dist")
         );
+    }
+
+    #[test]
+    fn web_dist_dir_validates_production_archive_resource_manifest() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        let executable = temp_dir.path().join(if cfg!(windows) {
+            "bin/harness-symphony.exe"
+        } else {
+            "bin/harness-symphony"
+        });
+        let resources = temp_dir.path().join("share/harness-symphony");
+        let dist = resources.join("web-ui");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(dist.join("index.html"), "<div id=\"root\"></div>").unwrap();
+        fs::write(
+            resources.join("resource-manifest.json"),
+            serde_json::json!({
+                "format_version": 1,
+                "binary_path": if cfg!(windows) { "bin/harness-symphony.exe" } else { "bin/harness-symphony" },
+                "web_asset_root": "share/harness-symphony/web-ui",
+                "web_asset_sha256": "a".repeat(64)
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let selected = web_dist_dir_with_paths(&config, None, Some(&executable)).unwrap();
+
+        assert_eq!(selected, dist);
+    }
+
+    #[test]
+    fn web_dist_dir_rejects_invalid_production_resource_manifest_without_fallback() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        let executable = temp_dir.path().join("bin/harness-symphony");
+        let resources = temp_dir.path().join("share/harness-symphony");
+        fs::create_dir_all(resources.join("web-ui")).unwrap();
+        fs::write(resources.join("resource-manifest.json"), "{}").unwrap();
+
+        let error = web_dist_dir_with_paths(&config, None, Some(&executable)).unwrap_err();
+
+        assert!(matches!(error, WebError::InvalidResourceManifest { .. }));
     }
 
     #[test]

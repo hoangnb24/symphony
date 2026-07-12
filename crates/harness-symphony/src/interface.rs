@@ -2,12 +2,16 @@ use std::env;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::auto::{options_from_config, run_auto_mode, AutoError, AutoRunSummary};
 use crate::config::{ConfigError, ResolvedConfig, SymphonyConfig};
 use crate::doctor::{print_report, run_doctor, DoctorError};
-use crate::harness_protocol::HarnessProtocol;
+use crate::harness_protocol::{
+    HarnessProtocol, CONTRACT_SCHEMA_MAXIMUM, CONTRACT_SCHEMA_MINIMUM, PROTOCOL_VERSION,
+    SUPPORTED_CLI_VERSIONS, SUPPORTED_DATABASE_SCHEMA_MAXIMUM, SUPPORTED_DATABASE_SCHEMA_MINIMUM,
+};
 use crate::pr::{create_pr, PrCreateResult, PrError};
 use crate::retention::{compact_runs, CompactResult, RetentionError};
 use crate::run::{
@@ -32,6 +36,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Report the Symphony and supported Harness contract versions.
+    Version(VersionArgs),
     /// Inspect Symphony readiness.
     Doctor,
     /// Discover runnable Harness work.
@@ -54,6 +60,36 @@ enum Command {
     Config(ConfigArgs),
     /// Hold, inspect, or release the crash-durable ownership migration fence.
     MigrationFence(MigrationFenceArgs),
+}
+
+#[derive(Args, Debug)]
+struct VersionArgs {
+    /// Emit stable machine-readable release metadata.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct VersionReport {
+    symphony_version: &'static str,
+    harness_protocol_version: u32,
+    harness_schema_minimum: u32,
+    harness_schema_maximum: u32,
+    current_harness_schema_minimum: u32,
+    current_harness_schema_maximum: u32,
+    supported_harness_cli_versions: &'static [&'static str],
+}
+
+fn version_report() -> VersionReport {
+    VersionReport {
+        symphony_version: env!("CARGO_PKG_VERSION"),
+        harness_protocol_version: PROTOCOL_VERSION,
+        harness_schema_minimum: CONTRACT_SCHEMA_MINIMUM,
+        harness_schema_maximum: CONTRACT_SCHEMA_MAXIMUM,
+        current_harness_schema_minimum: SUPPORTED_DATABASE_SCHEMA_MINIMUM,
+        current_harness_schema_maximum: SUPPORTED_DATABASE_SCHEMA_MAXIMUM,
+        supported_harness_cli_versions: SUPPORTED_CLI_VERSIONS,
+    }
 }
 
 #[derive(Args, Debug)]
@@ -220,6 +256,26 @@ pub enum InterfaceError {
 }
 
 pub fn run(cli: Cli) -> Result<(), InterfaceError> {
+    if let Command::Version(args) = &cli.command {
+        let report = version_report();
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string(&report).expect("version report serializes")
+            );
+        } else {
+            println!(
+                "harness-symphony {} (Harness protocol {}, schema {}..={}, current {}..={})",
+                report.symphony_version,
+                report.harness_protocol_version,
+                report.harness_schema_minimum,
+                report.harness_schema_maximum,
+                report.current_harness_schema_minimum,
+                report.current_harness_schema_maximum
+            );
+        }
+        return Ok(());
+    }
     let repo_root = match cli.repo_root {
         Some(path) => path,
         None => env::current_dir().map_err(InterfaceError::CurrentDir)?,
@@ -228,6 +284,7 @@ pub fn run(cli: Cli) -> Result<(), InterfaceError> {
     let resolved = config.resolve(&repo_root);
 
     match cli.command {
+        Command::Version(_) => unreachable!("version returned before config loading"),
         Command::Config(args) => match args.action {
             ConfigAction::Show => print_config(&resolved),
         },
@@ -660,6 +717,7 @@ mod tests {
         assert!(help.contains("pr"));
         assert!(help.contains("config"));
         assert!(help.contains("migration-fence"));
+        assert!(help.contains("version"));
         assert!(Cli::try_parse_from([
             "harness-symphony",
             "migration-fence",
@@ -678,5 +736,25 @@ mod tests {
             "0",
         ])
         .is_ok());
+        assert!(Cli::try_parse_from(["harness-symphony", "version", "--json"]).is_ok());
+    }
+
+    #[test]
+    fn machine_version_report_exposes_release_contract_tuple() {
+        let report = version_report();
+
+        assert_eq!(report.symphony_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(report.harness_protocol_version, 1);
+        assert_eq!(report.harness_schema_minimum, 1);
+        assert_eq!(report.harness_schema_maximum, 13);
+        assert_eq!(report.current_harness_schema_minimum, 12);
+        assert_eq!(report.current_harness_schema_maximum, 13);
+        assert_eq!(report.supported_harness_cli_versions, ["0.1.14"]);
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["harness_protocol_version"], 1);
+        assert_eq!(json["harness_schema_minimum"], 1);
+        assert_eq!(json["harness_schema_maximum"], 13);
+        assert_eq!(json["current_harness_schema_minimum"], 12);
+        assert_eq!(json["current_harness_schema_maximum"], 13);
     }
 }

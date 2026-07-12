@@ -2,13 +2,19 @@
   "name": "symphony-web-ui",
   "private": true,
   "version": "0.1.0",
+  "description": "Desktop and Web controller for Symphony Harness story orchestration",
+  "author": "Symphony contributors",
+  "license": "MIT",
+  "homepage": "https://github.com/hoangnb24/symphony",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "build": "tsc -b && vite build",
-    "desktop:build": "npm run build && cd ../../.. && cargo build -p harness-symphony --release && cd crates/harness-symphony/web-ui && electron-builder --dir",
+    "desktop:build": "npm run build && cd ../../.. && cargo build -p harness-symphony --release && cd crates/harness-symphony/web-ui && npm run desktop:stage && electron-builder --dir",
     "desktop:dev": "node electron/dev.cjs",
-    "desktop:package": "npm run build && cd ../../.. && cargo build -p harness-symphony --release && cd crates/harness-symphony/web-ui && electron-builder",
+    "desktop:package": "npm run build && cd ../../.. && cargo build -p harness-symphony --release && cd crates/harness-symphony/web-ui && npm run desktop:stage && electron-builder",
+    "desktop:packaged-smoke": "node electron/packaged-smoke.cjs",
+    "desktop:stage": "node electron/stage-resources.cjs",
     "desktop:smoke": "npm run build && node electron/smoke.cjs",
     "dev": "node electron/browser-dev.cjs",
     "e2e": "playwright test",
@@ -49,12 +55,8 @@
     ],
     "extraResources": [
       {
-        "from": "dist",
-        "to": "web-ui-dist"
-      },
-      {
-        "from": "../../../target/release/harness-symphony",
-        "to": "bin/harness-symphony"
+        "from": "desktop-resources",
+        "to": "."
       }
     ],
     "mac": {

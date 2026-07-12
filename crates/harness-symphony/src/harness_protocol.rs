@@ -25,6 +25,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const CONTRACT_SCHEMA_MINIMUM: u32 = 1;
 pub const CONTRACT_SCHEMA_MAXIMUM: u32 = 13;
 pub const SUPPORTED_DATABASE_SCHEMA_MINIMUM: u32 = 12;
+pub const SUPPORTED_DATABASE_SCHEMA_MAXIMUM: u32 = CONTRACT_SCHEMA_MAXIMUM;
 pub const OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MUTATION_TIMEOUT: Duration = Duration::from_secs(300);

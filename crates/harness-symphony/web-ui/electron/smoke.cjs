@@ -40,7 +40,7 @@ function assertOldCratePathIsRejected() {
     try {
       findRepoRoot({ repoRoot: decoy });
     } catch (error) {
-      rejected = /does not contain Symphony config/.test(error.message);
+      rejected = /compatible Harness CLI\/database contract/.test(error.message);
     }
     if (!rejected) {
       throw new Error("A directory containing only the retired Symphony crate path was accepted");
@@ -73,6 +73,22 @@ function assertIncompatibleHarnessCliIsRejected() {
   }
 }
 
+function assertConfigurationIsOptional(fixtureRoot) {
+  const config = path.join(fixtureRoot, ".harness", "symphony.yml");
+  if (!fs.existsSync(config)) {
+    return;
+  }
+  const backup = `${config}.desktop-smoke-backup`;
+  fs.renameSync(config, backup);
+  try {
+    if (findRepoRoot({ repoRoot: fixtureRoot }) !== fixtureRoot) {
+      throw new Error("Normal Harness evidence without optional Symphony config was rejected");
+    }
+  } finally {
+    fs.renameSync(backup, config);
+  }
+}
+
 async function main() {
   checkSyntax(path.join(webUiRoot, "electron", "backend.cjs"));
   checkSyntax(path.join(webUiRoot, "electron", "main.cjs"));
@@ -88,6 +104,7 @@ async function main() {
   const fixtureRoot = findRepoRoot({ repoRoot: selected });
   assertOldCratePathIsRejected();
   assertIncompatibleHarnessCliIsRejected();
+  assertConfigurationIsOptional(fixtureRoot);
 
   runChecked("cargo", ["build", "-p", "harness-symphony"]);
   const backend = startBackend({
