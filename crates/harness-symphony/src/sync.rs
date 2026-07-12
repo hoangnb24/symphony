@@ -269,9 +269,13 @@ mod tests {
 
         let error = sync_changeset(&config, "run_old").unwrap_err();
 
-        assert!(
-            matches!(error, SyncError::Protocol(HarnessProtocolError::UnsupportedCliVersion { actual }) if actual == "0.1.11")
-        );
+        assert!(matches!(
+            error,
+            SyncError::Protocol(HarnessProtocolError::ProtocolVersion {
+                expected: 1,
+                actual: 0
+            })
+        ));
         assert!(!config.state_db.exists());
     }
 
@@ -568,11 +572,12 @@ mod tests {
 
     fn write_fake_cli(path: &Path, compatible: bool) {
         let version = if compatible { "0.1.14" } else { "0.1.11" };
+        let protocol = if compatible { 1 } else { 0 };
         let script = format!(
             r#"#!/bin/sh
 printf '%s\n' "$@" >> sync-args.log
 if [ "$1 $2 $3" = "query contract --json" ]; then
-  printf '%s\n' '{{"protocol_version":1,"operation":"query.contract","request_id":null,"result":{{"protocol_version":1,"cli_version":"{version}","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]}},"error":null}}'
+  printf '%s\n' '{{"protocol_version":1,"operation":"query.contract","request_id":null,"result":{{"protocol_version":{protocol},"cli_version":"{version}","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]}},"error":null}}'
 elif [ "$3" = "status" ]; then
   id=$(basename "$4" .changeset.jsonl)
   applied=false

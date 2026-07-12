@@ -749,7 +749,7 @@ mod tests {
         assert_eq!(report.harness_schema_maximum, 13);
         assert_eq!(report.current_harness_schema_minimum, 12);
         assert_eq!(report.current_harness_schema_maximum, 13);
-        assert_eq!(report.supported_harness_cli_versions, ["0.1.14"]);
+        assert_eq!(report.supported_harness_cli_versions, ["0.1.14", "0.1.15"]);
         let json = serde_json::to_value(report).unwrap();
         assert_eq!(json["harness_protocol_version"], 1);
         assert_eq!(json["harness_schema_minimum"], 1);

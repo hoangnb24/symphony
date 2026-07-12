@@ -9,7 +9,7 @@ tar -xzf "$archive" -C "$temp"
 binary="$temp/bin/harness-symphony"
 [[ -x "$binary" ]]
 "$binary" --version | rg -q '^harness-symphony '
-"$binary" version --json | jq -e '. == {symphony_version:"0.1.0",harness_protocol_version:1,harness_schema_minimum:1,harness_schema_maximum:13,current_harness_schema_minimum:12,current_harness_schema_maximum:13,supported_harness_cli_versions:["0.1.14"]}' >/dev/null
+"$binary" version --json | jq -e '. == {symphony_version:"0.1.1",harness_protocol_version:1,harness_schema_minimum:1,harness_schema_maximum:13,current_harness_schema_minimum:12,current_harness_schema_maximum:13,supported_harness_cli_versions:["0.1.14","0.1.15"]}' >/dev/null
 cli="$fixture/scripts/bin/harness-cli"; [[ -x "$cli" ]] || cli="$fixture/scripts/bin/harness-cli.exe"
 contract=$(cd "$fixture" && "$cli" query contract --json)
 jq -e '.protocol_version == 1 and .operation == "query.contract" and .result.cli_version == "0.1.14" and .result.protocol_version == 1 and .result.schema_minimum == 1 and .result.schema_maximum == 13 and .result.database_schema_version == 13 and .result.database_state == "current" and (["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"] - .result.capabilities | length == 0)' <<<"$contract" >/dev/null

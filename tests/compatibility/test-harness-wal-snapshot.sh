@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cli=${HARNESS_CLI_PATH:-"$repo_root/scripts/bin/harness-cli"}
+expected_cli_version=${EXPECTED_HARNESS_CLI_VERSION:-0.1.14}
 temp=$(mktemp -d)
 reader_pid=
 cleanup() {
@@ -13,8 +14,8 @@ cleanup() {
 trap cleanup EXIT
 
 [[ -x "$cli" ]] || { echo "missing executable Harness CLI: $cli" >&2; exit 1; }
-[[ "$($cli --version)" == "harness-cli 0.1.14" ]] || {
-  echo "WAL snapshot compatibility is pinned to harness-cli 0.1.14" >&2
+[[ "$($cli --version)" == "harness-cli $expected_cli_version" ]] || {
+  echo "WAL snapshot compatibility expected harness-cli $expected_cli_version" >&2
   exit 1
 }
 

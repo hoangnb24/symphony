@@ -3,14 +3,15 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cli=${HARNESS_CLI_PATH:-"$repo_root/scripts/bin/harness-cli"}
+expected_cli_version=${EXPECTED_HARNESS_CLI_VERSION:-0.1.14}
 unset HARNESS_CLI_PATH
 binary="$repo_root/target/debug/harness-symphony"
 temp=$(mktemp -d)
 trap 'rm -rf "$temp"' EXIT
 
 [[ -x "$cli" ]] || { echo "missing Harness CLI: $cli" >&2; exit 1; }
-[[ "$($cli --version)" == "harness-cli 0.1.14" ]] || {
-  echo "compatibility suite requires the immutable harness-cli-v0.1.14 artifact" >&2
+[[ "$($cli --version)" == "harness-cli $expected_cli_version" ]] || {
+  echo "compatibility suite expected harness-cli-v$expected_cli_version" >&2
   exit 1
 }
 
@@ -76,16 +77,16 @@ YAML
   [[ "$changesets_before" == "$changesets_after" ]] || { echo "$name preflight changed active changesets" >&2; exit 1; }
 }
 
-run_negative_fixture legacy \
-  "{\"protocol_version\":1,\"operation\":\"query.contract\",\"request_id\":\"negative\",\"result\":{\"protocol_version\":1,\"cli_version\":\"0.1.11\",\"schema_minimum\":1,\"schema_maximum\":13,\"database_state\":\"current\",\"database_schema_version\":13,\"required_environment_variables\":[\"HARNESS_DB_PATH\"],\"capabilities\":$full_capabilities}}" \
-  '0\.1\.11|harness-cli-v0\.1\.14'
+run_negative_fixture wrong-protocol \
+  "{\"protocol_version\":1,\"operation\":\"query.contract\",\"request_id\":\"negative\",\"result\":{\"protocol_version\":0,\"cli_version\":\"$expected_cli_version\",\"schema_minimum\":1,\"schema_maximum\":13,\"database_state\":\"current\",\"database_schema_version\":13,\"required_environment_variables\":[\"HARNESS_DB_PATH\"],\"capabilities\":$full_capabilities}}" \
+  'unsupported Harness protocol 0'
 run_negative_fixture malformed 'this is not protocol JSON' 'malformed JSON'
 missing_capabilities=${full_capabilities/\"isolated-db-snapshot.v1\",/}
 run_negative_fixture missing-capability \
-  "{\"protocol_version\":1,\"operation\":\"query.contract\",\"request_id\":\"negative\",\"result\":{\"protocol_version\":1,\"cli_version\":\"0.1.14\",\"schema_minimum\":1,\"schema_maximum\":13,\"database_state\":\"current\",\"database_schema_version\":13,\"required_environment_variables\":[\"HARNESS_DB_PATH\"],\"capabilities\":$missing_capabilities}}" \
+  "{\"protocol_version\":1,\"operation\":\"query.contract\",\"request_id\":\"negative\",\"result\":{\"protocol_version\":1,\"cli_version\":\"$expected_cli_version\",\"schema_minimum\":1,\"schema_maximum\":13,\"database_state\":\"current\",\"database_schema_version\":13,\"required_environment_variables\":[\"HARNESS_DB_PATH\"],\"capabilities\":$missing_capabilities}}" \
   'missing capability isolated-db-snapshot\.v1'
 
 "$repo_root/tests/architecture/no-direct-harness-db-access.sh"
 HARNESS_CLI_PATH="$cli" "$repo_root/tests/compatibility/test-harness-wal-snapshot.sh"
 
-echo "Harness protocol compatibility passed; legacy, malformed, and missing-capability fixtures failed before mutation"
+echo "Harness protocol compatibility passed; wrong-protocol, malformed, and missing-capability fixtures failed before mutation"

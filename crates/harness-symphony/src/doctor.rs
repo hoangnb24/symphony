@@ -199,10 +199,10 @@ fn protocol_failure(error: HarnessProtocolError) -> DoctorCheck {
         detail: error.to_string(),
         next: Some(match error {
             HarnessProtocolError::DatabaseMissing { .. } =>
-                "Initialize the database explicitly with harness-cli-v0.1.14, then rerun doctor.".to_owned(),
+                "Initialize the database explicitly with a checksum-verified Harness CLI whose protocol contract matches, then rerun doctor.".to_owned(),
             HarnessProtocolError::DatabaseNeedsMigration { .. } =>
-                "Back up and migrate the database with harness-cli-v0.1.14, then rerun doctor.".to_owned(),
-            _ => "Install the checksum-verified harness-cli-v0.1.14 release or configure repo.harness_cli/HARNESS_CLI_PATH, then rerun doctor.".to_owned(),
+                "Back up and migrate the database with a checksum-verified protocol-compatible Harness CLI, then rerun doctor.".to_owned(),
+            _ => "Install a checksum-verified protocol-compatible Harness CLI or configure repo.harness_cli/HARNESS_CLI_PATH, then rerun doctor.".to_owned(),
         }),
     }
 }
@@ -571,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_cli_has_actionable_upgrade_error() {
+    fn contract_compatible_cli_is_not_rejected_by_patch_version_label() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = base_config();
         config.repo_root = temp.path().to_path_buf();
@@ -582,9 +582,8 @@ mod tests {
 
         let check = check_harness_protocol(&config);
 
-        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(check.status, CheckStatus::Pass);
         assert!(check.detail.contains("0.1.11"));
-        assert!(check.next.unwrap().contains("harness-cli-v0.1.14"));
         assert!(!config.harness_db.exists());
     }
 
@@ -602,7 +601,10 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.detail.contains("stories.write.v1"));
-        assert!(check.next.unwrap().contains("harness-cli-v0.1.14"));
+        assert!(check
+            .next
+            .unwrap()
+            .contains("protocol-compatible Harness CLI"));
     }
 
     fn write_contract_cli(path: &Path, version: &str, complete: bool) {

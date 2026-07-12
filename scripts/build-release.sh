@@ -26,7 +26,7 @@ else
   cargo build --manifest-path "$root/Cargo.toml" --release --locked --target "$target"
 fi
 [[ -x "$binary" || "$binary_name" == *.exe && -f "$binary" ]] || { echo "release binary missing: $binary" >&2; exit 1; }
-"$binary" version --json | jq -e --arg version "$version" '.symphony_version == $version and .harness_protocol_version == 1 and .harness_schema_minimum == 1 and .harness_schema_maximum == 13 and .current_harness_schema_minimum == 12 and .current_harness_schema_maximum == 13 and .supported_harness_cli_versions == ["0.1.14"]' >/dev/null
+"$binary" version --json | jq -e --arg version "$version" '.symphony_version == $version and .harness_protocol_version == 1 and .harness_schema_minimum == 1 and .harness_schema_maximum == 13 and .current_harness_schema_minimum == 12 and .current_harness_schema_maximum == 13 and .supported_harness_cli_versions == ["0.1.14","0.1.15"]' >/dev/null
 npm --prefix "$root/crates/harness-symphony/web-ui" run build
 
 mkdir -p "$dist"

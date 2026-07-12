@@ -16,7 +16,7 @@ try {
   & $binary --version
   if ($LASTEXITCODE -ne 0) { throw '--version failed' }
   $version = (& $binary version --json | ConvertFrom-Json)
-  if ($version.symphony_version -ne '0.1.0' -or $version.harness_protocol_version -ne 1 -or $version.harness_schema_minimum -ne 1 -or $version.harness_schema_maximum -ne 13 -or $version.current_harness_schema_minimum -ne 12 -or $version.current_harness_schema_maximum -ne 13 -or ($version.supported_harness_cli_versions -join ',') -ne '0.1.14') { throw 'version JSON contract mismatch' }
+  if ($version.symphony_version -ne '0.1.1' -or $version.harness_protocol_version -ne 1 -or $version.harness_schema_minimum -ne 1 -or $version.harness_schema_maximum -ne 13 -or $version.current_harness_schema_minimum -ne 12 -or $version.current_harness_schema_maximum -ne 13 -or ($version.supported_harness_cli_versions -join ',') -ne '0.1.14,0.1.15') { throw 'version JSON contract mismatch' }
   $cli = Join-Path $Fixture 'scripts/bin/harness-cli.exe'
   Push-Location $Fixture
   try {
