@@ -1,78 +1,73 @@
 # Symphony
 
-Symphony is a local orchestrator for running Harness stories. It prepares an
-isolated workspace for an agent, passes the story contract explicitly, records
-run results, and keeps durable Harness updates reviewable.
+Symphony is a local orchestrator for running Harness stories. It discovers
+runnable work through the public Harness CLI protocol, prepares an isolated
+workspace, gives an agent an explicit run contract, validates its result, and
+keeps product changes and durable Harness changesets reviewable.
 
-This repository is the standalone Symphony product. Its imported source layout
-is intentionally preserved for the first standalone release:
+Symphony is a standalone product. It does not require a checkout of Harness,
+link Harness source, inspect Harness database tables, or copy a live SQLite
+database. The typed boundary is documented in
+[`docs/contracts/harness-runtime-v1.md`](docs/contracts/harness-runtime-v1.md).
+
+## Operator workflow
+
+An operator runs a built Symphony executable against the repository that owns
+the stories. The repository can be different from the current directory.
+
+Packaged Symphony release assets are planned in US-096 and are not published
+yet. Today, obtain a locally built executable from a Symphony contributor and
+set its path explicitly:
+
+```bash
+SYMPHONY=/absolute/path/to/harness-symphony
+REPO=/absolute/path/to/your-harness-repository
+
+"$SYMPHONY" --repo-root "$REPO" doctor
+"$SYMPHONY" --repo-root "$REPO" work list
+"$SYMPHONY" --repo-root "$REPO" run <story-id> --prepare-only
+```
+
+```powershell
+$Symphony = "C:\absolute\path\to\harness-symphony.exe"
+$Repo = "C:\absolute\path\to\your-harness-repository"
+
+& $Symphony --repo-root $Repo doctor
+& $Symphony --repo-root $Repo work list
+& $Symphony --repo-root $Repo run <story-id> --prepare-only
+```
+
+The target repository must have a compatible Harness CLI and Harness database.
+`doctor` reports the resolved CLI and any corrective action. See the
+[`Quick Start`](docs/SYMPHONY_QUICKSTART.md) for the complete run, review, PR,
+and sync loop. A configuration template is available at
+[`examples/symphony.yml`](examples/symphony.yml); copy it to the target
+repository as `.harness/symphony.yml` only when defaults are insufficient.
+
+## Contributor workflow
+
+The source workspace currently contains one Rust application and its Web UI:
 
 ```text
 crates/harness-symphony/          Rust application
 crates/harness-symphony/web-ui/   React, Playwright, and Electron UI
 ```
 
-The Cargo workspace has exactly that one member and does not depend on a
-checkout of `repository-harness`.
-
-## Harness runtime
-
-The generic Harness template is installed with merge semantics so contributors
-can inspect its policies and schemas. Symphony consumes the checksum-verified
-`harness-cli-v0.1.14` protocol-v1 release through a typed process adapter; it
-does not depend on Harness source or tables. See
-[`docs/contracts/harness-runtime-v1.md`](docs/contracts/harness-runtime-v1.md)
-for the exact compatibility tuple, executable discovery order, and upgrade
-command.
-
-## Prerequisites
-
-- Rust `1.92.0`, pinned by `rust-toolchain.toml`, with rustfmt and Clippy.
-- Node.js `24.9.0`, pinned by `.node-version`.
-- npm, supplied with the pinned Node.js distribution.
-
-These conservative pins match the toolchains used to create and validate the
-standalone workspace. Rustup reads the Rust pin automatically. With a Node
-version manager that supports `.node-version`, select the Node pin before
-installing packages (for example, `fnm use`). Do not use an existing
-`node_modules` directory as proof of a clean checkout: CI and the commands
-below use `npm ci` against the committed lockfile.
-
-## Build and run
-
-From the repository root:
+Prerequisites are Rust `1.92.0` (pinned by `rust-toolchain.toml`) and Node.js
+`24.9.0` (pinned by `.node-version`). Build and exercise the source checkout
+from its repository root:
 
 ```bash
 cargo build --locked -p harness-symphony
-cargo run --locked -p harness-symphony -- doctor
-cargo run --locked -p harness-symphony -- work list
-```
+cargo run --locked -p harness-symphony -- --repo-root /path/to/target doctor
+cargo run --locked -p harness-symphony -- --repo-root /path/to/target work list
 
-The product documentation starts at
-[`docs/SYMPHONY_QUICKSTART.md`](docs/SYMPHONY_QUICKSTART.md) and
-[`docs/SYMPHONY_SCOPE.md`](docs/SYMPHONY_SCOPE.md).
-
-## Web and desktop development
-
-Install exactly the dependency graph in the Web UI lockfile, then use its npm
-scripts without changing directories:
-
-```bash
 npm --prefix crates/harness-symphony/web-ui ci
 npm --prefix crates/harness-symphony/web-ui run build
 npm --prefix crates/harness-symphony/web-ui run dev
 ```
 
-The desktop smoke test builds both the Web UI and the Rust backend and verifies
-their repository-relative asset discovery:
-
-```bash
-npm --prefix crates/harness-symphony/web-ui run desktop:smoke
-```
-
-## Contributor verification
-
-Run the same gates as CI from the repository root:
+Run the CI-equivalent checks before submitting a source change:
 
 ```bash
 cargo metadata --locked --no-deps --format-version 1
@@ -82,18 +77,21 @@ cargo test --workspace --locked
 cargo build --workspace --release --locked
 
 npm --prefix crates/harness-symphony/web-ui ci
-npm --prefix crates/harness-symphony/web-ui exec -- playwright install --with-deps chromium
+npm --prefix crates/harness-symphony/web-ui exec -- playwright install chromium
 npm --prefix crates/harness-symphony/web-ui run build
 npm --prefix crates/harness-symphony/web-ui run e2e
 npm --prefix crates/harness-symphony/web-ui run desktop:smoke
 ```
 
-`playwright install --with-deps chromium` installs Linux system packages and
-therefore may require elevated privileges. On macOS or Windows, install the
-Chromium browser with `playwright install chromium` instead; CI executes the
-full `--with-deps` form on Linux and runs the build and desktop path smoke on
-all three operating systems.
+On Linux CI, Playwright may use `playwright install --with-deps chromium`; that
+can require elevated privileges because it installs system packages.
 
-## License
+## Product contract
+
+- [`docs/SYMPHONY_QUICKSTART.md`](docs/SYMPHONY_QUICKSTART.md) — operator loop.
+- [`docs/SYMPHONY_SCOPE.md`](docs/SYMPHONY_SCOPE.md) — implemented contract and
+  future boundary.
+- [`docs/contracts/harness-runtime-v1.md`](docs/contracts/harness-runtime-v1.md)
+  — pinned external protocol.
 
 Symphony is available under the [MIT License](LICENSE).

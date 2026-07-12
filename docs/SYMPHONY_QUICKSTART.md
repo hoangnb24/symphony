@@ -1,365 +1,167 @@
-# Harness Symphony Quick Start
+# Symphony Quick Start
 
-Harness Symphony is the local runner for Harness stories. It prepares a safe
-workspace, gives the agent an explicit contract, collects the result, and keeps
-durable Harness state reviewable through committed changesets.
+This guide is for an operator running a built Symphony artifact against a
+Harness-enabled target repository. Packaged release downloads arrive in US-096;
+for now, use a locally built artifact supplied from this source repository.
 
-Use this guide when you want to run a story, not when you want to understand the
-full design. The full design lives in `docs/SYMPHONY_SCOPE.md`.
+## 1. Choose the artifact and target repository
 
-## What Symphony Does
-
-Symphony turns this:
-
-```text
-Harness story
-```
-
-into this:
-
-```text
-isolated run workspace
-  + WAL-safe harness.db snapshot
-  + RUN_CONTRACT.json
-  + agent execution
-  + SUMMARY.md
-  + RESULT.json
-  + .harness/changesets/<run_id>.changeset.jsonl
-```
-
-The important rule: the root `harness.db` is not the source of truth for a run.
-The run writes to a protocol-created snapshot, and durable Harness changes are
-preserved as semantic changesets. See
-`docs/contracts/harness-runtime-v1.md` for the pinned CLI contract.
-
-## Visual Map
-
-Use this as the quick mental picture:
-
-```text
-+---------------+
-| Harness story |
-+-------+-------+
-        | work list chooses a runnable story
-        v
-+-------------------------------------------------------------+
-| Normal / high-risk run                                      |
-|                                                             |
-|  .symphony/worktrees/<run_id>/                              |
-|    +- harness.db                online-backup snapshot       |
-|    +- AGENTS.md                 Symphony shim for the agent  |
-|    +- .harness/runs/<run_id>/RUN_CONTRACT.json              |
-+-------+-----------------------------------------------------+
-        | agent works only inside the assigned run contract
-        v
-+-------------------------------------------------------------+
-| Required outputs                                            |
-|                                                             |
-|  .harness/runs/<run_id>/SUMMARY.md                          |
-|  .harness/runs/<run_id>/RESULT.json                         |
-|  .harness/changesets/<run_id>.changeset.jsonl               |
-+-------+-----------------------------------------------------+
-        | review, merge, then replay committed changesets
-        v
-+-----------------------+
-| harness-symphony sync |
-+-----------------------+
-```
-
-Tiny stories take a shorter path:
-
-```text
-+------------+
-| tiny story |
-+-----+------+
-        | harness-symphony run <story-id> --here
-        v
-+-------------------------------------------------------------+
-| current checkout                                            |
-|   + WAL-safe DB snapshot under .symphony/runs/              |
-|   + SUMMARY.md, RESULT.json, and changeset still required   |
-+-------------------------------------------------------------+
-```
-
-## Mermaid Flow
-
-```mermaid
-flowchart TD
-    A[Harness story] --> B{Lane}
-    B -->|tiny| C[run story-id --here]
-    B -->|normal or high-risk| D[run story-id --prepare-only]
-    D --> E[Isolated worktree]
-    E --> F[RUN_CONTRACT.json and AGENTS.md shim]
-    F --> G[run story-id]
-    C --> H[Agent writes required outputs]
-    G --> H
-    H --> I[SUMMARY.md]
-    H --> J[RESULT.json]
-    H --> K[Semantic changeset JSONL]
-    I --> L[Review or PR]
-    J --> L
-    K --> L
-    L --> M[Merge]
-    M --> N[harness-symphony sync]
-    N --> O[Local harness.db updated]
-```
-
-```mermaid
-flowchart LR
-    subgraph Root[Root checkout]
-        RDB[(root harness.db)]
-        RCODE[repo files]
-    end
-
-    subgraph Run[Symphony run workspace]
-        W[.symphony/worktrees/run_id]
-        CDB[(WAL-safe harness.db snapshot)]
-        CONTRACT[RUN_CONTRACT.json]
-        AGENTS[AGENTS.md shim]
-        OUT[SUMMARY.md + RESULT.json]
-        CHANGESET[changeset JSONL]
-    end
-
-    RDB -. protocol snapshot, not mutated .-> CDB
-    RCODE --> W
-    W --> CONTRACT
-    W --> AGENTS
-    CDB --> CHANGESET
-    CONTRACT --> OUT
-    OUT --> Review[human review]
-    CHANGESET --> Review
-```
-
-## First Run Checklist
-
-Run these from the repository root.
-
-### 1. Build The CLI
+The artifact can live anywhere. Always identify the target with `--repo-root`,
+which makes commands independent of the current working directory.
 
 ```bash
-cargo build -p harness-symphony
+SYMPHONY=/absolute/path/to/harness-symphony
+REPO=/absolute/path/to/target-repository
 ```
 
-During development, the command path is:
+```powershell
+$Symphony = "C:\absolute\path\to\harness-symphony.exe"
+$Repo = "C:\absolute\path\to\target-repository"
+```
+
+The target needs a compatible Harness CLI and an initialized Harness database.
+Symphony discovers the executable according to the
+[`runtime contract`](contracts/harness-runtime-v1.md). Optional settings are
+documented in [`examples/symphony.yml`](../examples/symphony.yml).
+
+## 2. Check readiness and select work
 
 ```bash
-target/debug/harness-symphony
+"$SYMPHONY" --repo-root "$REPO" doctor
+"$SYMPHONY" --repo-root "$REPO" work list
 ```
 
-### 2. Check Readiness
+```powershell
+& $Symphony --repo-root $Repo doctor
+& $Symphony --repo-root $Repo work list
+```
+
+Fix `doctor` failures before a run. In `work list`, `yes` means runnable,
+`warn` means non-runnable until an operator resolves the reported gap (commonly missing verification), and
+`no` means Symphony will not run that story yet.
+
+## 3. Prepare and execute
+
+For a normal or high-risk story, inspect the isolated workspace and contract
+before launch:
 
 ```bash
-target/debug/harness-symphony doctor
+"$SYMPHONY" --repo-root "$REPO" run <story-id> --prepare-only
+"$SYMPHONY" --repo-root "$REPO" run <story-id>
 ```
 
-Fix any `fail` rows before running a normal story. Warnings are usually
-actionable configuration gaps; read the message before deciding to continue.
+```powershell
+& $Symphony --repo-root $Repo run <story-id> --prepare-only
+& $Symphony --repo-root $Repo run <story-id>
+```
 
-### 3. See Runnable Work
+Preparation creates a worktree below `.symphony/worktrees/<run_id>/` and writes
+`.harness/runs/<run_id>/RUN_CONTRACT.json` inside that workspace. Harness
+creates the isolated database through its WAL-safe snapshot protocol. Symphony
+then launches the configured agent adapter.
+
+Tiny-lane stories may run in the target checkout:
 
 ```bash
-target/debug/harness-symphony work list
+"$SYMPHONY" --repo-root "$REPO" run <story-id> --here
 ```
 
-Look for a story with `Runnable` set to `yes` or `warn`.
-
-- `yes`: ready to run.
-- `warn`: runnable, but something important is missing, often a verification
-  command.
-- `no`: do not run it through Symphony yet.
-
-### 4. Prepare A Normal Or High-Risk Story
-
-Use `--prepare-only` when you want to inspect what Symphony will give the agent
-before actually launching one:
-
-```bash
-target/debug/harness-symphony run <story-id> --prepare-only
+```powershell
+& $Symphony --repo-root $Repo run <story-id> --here
 ```
 
-This creates an isolated worktree under:
+Symphony refuses `--here` for normal and high-risk stories. The lightweight
+path still uses an isolated database and requires the same result artifacts.
 
-```text
-.symphony/worktrees/<run_id>/
-```
+## 4. Understand the outputs
 
-It also creates a run contract at:
-
-```text
-.harness/runs/<run_id>/RUN_CONTRACT.json
-```
-
-The worktree `AGENTS.md` contains a Symphony block that points the agent to the
-contract and repeats the assigned story, copied database path, required outputs,
-and forbidden paths.
-
-### 5. Execute A Normal Or High-Risk Story
-
-When the repo is configured with an agent adapter, run:
-
-```bash
-target/debug/harness-symphony run <story-id>
-```
-
-The agent must produce:
+Every completed agent run must write, under its workspace:
 
 ```text
 .harness/runs/<run_id>/SUMMARY.md
 .harness/runs/<run_id>/RESULT.json
 ```
 
-If the run writes durable Harness records, it must also produce:
+`RESULT.json` is the machine-readable outcome contract; `SUMMARY.md` is the
+human review narrative. If the run performs durable Harness mutations, the
+Harness CLI also writes:
 
 ```text
 .harness/changesets/<run_id>.changeset.jsonl
 ```
 
-Symphony validates the result before accepting the run.
+The distinction matters:
 
-## Tiny Story Shortcut
+- `SUMMARY.md`, `RESULT.json`, logs, and validation output are local run
+  evidence. They are inspected by Symphony and used by the review UI, but are
+  not durable repository records.
+- Product/code/docs changes and semantic changesets are branch changes and may
+  be committed and reviewed in a pull request.
+- `harness.db` and `.symphony/state.db` are local indexes and are never PR
+  artifacts.
 
-Tiny-lane stories can use a lighter path:
+For example, a run that changes `src/parser.rs` and records a story transition
+can produce a branch containing `src/parser.rs` plus one changeset JSONL. Its
+summary becomes the PR description; its `RESULT.json` remains local evidence.
 
-```bash
-target/debug/harness-symphony run <story-id> --here
-```
-
-Use `--here` only for tiny stories. It skips the separate worktree, but it still
-uses a copied database and still requires the same run artifacts.
-
-Do not use `--here` for normal or high-risk work. Symphony refuses those lanes
-because they need the full isolation loop.
-
-## After A Run
-
-Check status:
+Inspect a run with:
 
 ```bash
-target/debug/harness-symphony status
+"$SYMPHONY" --repo-root "$REPO" status
+"$SYMPHONY" --repo-root "$REPO" runs list
+"$SYMPHONY" --repo-root "$REPO" runs show <run_id>
 ```
 
-List runs:
+```powershell
+& $Symphony --repo-root $Repo status
+& $Symphony --repo-root $Repo runs list
+& $Symphony --repo-root $Repo runs show <run_id>
+```
+
+## 5. Optional pull request and post-merge sync
+
+When a PR provider is configured, Symphony can create or retry a PR from a
+finished run:
 
 ```bash
-target/debug/harness-symphony runs list
+"$SYMPHONY" --repo-root "$REPO" pr create <run_id>
+"$SYMPHONY" --repo-root "$REPO" pr retry <run_id>
 ```
 
-Inspect one run:
+```powershell
+& $Symphony --repo-root $Repo pr create <run_id>
+& $Symphony --repo-root $Repo pr retry <run_id>
+```
+
+PR creation is optional. It uses the summary as the PR body and publishes the
+run branch containing its product changes and durable semantic changeset; it
+does not turn local result files or databases into committed state.
+
+After the PR is accepted, pull the merged branch and replay new committed
+changesets into the target's local Harness database:
 
 ```bash
-target/debug/harness-symphony runs show <run_id>
+"$SYMPHONY" --repo-root "$REPO" sync
 ```
 
-Review these local files before opening a PR:
-
-```text
-.harness/runs/<run_id>/SUMMARY.md
-.harness/runs/<run_id>/RESULT.json
-.harness/changesets/<run_id>.changeset.jsonl
+```powershell
+& $Symphony --repo-root $Repo sync
 ```
 
-`SUMMARY.md` is the human review surface. It should include a readable Harness
-changes table so reviewers do not have to inspect raw JSONL first. PR creation
-uses the summary as the PR body and commits only the durable changeset artifact.
+`sync` goes through the typed Harness changeset-status/apply protocol. It is
+idempotent: an already applied changeset is skipped, while an invalid or
+incompatible change fails before Symphony marks it applied.
 
-## Optional PR Flow
+## Contributor-only source workflow
 
-If PR creation is configured, create a PR for a finished run:
+Operators do not need Cargo, the source tree, or a repository-relative binary
+path. Contributors who are building the current artifact use:
 
 ```bash
-target/debug/harness-symphony pr create <run_id>
+cargo build --locked -p harness-symphony
+cargo test --workspace --locked
+cargo run --locked -p harness-symphony -- --repo-root /path/to/target doctor
 ```
 
-Retry PR creation after fixing configuration or provider issues:
-
-```bash
-target/debug/harness-symphony pr retry <run_id>
-```
-
-PRs should include the run summary, result file, changeset, and any product or
-docs changes made by the agent.
-
-## After Merge
-
-After pulling merged changes, apply committed changesets to your local
-`harness.db`:
-
-```bash
-target/debug/harness-symphony sync
-```
-
-`sync` is idempotent. Running it twice is safe; already applied changesets are
-skipped.
-
-On a fresh clone, rebuild the local Harness database from committed changesets:
-
-```bash
-scripts/bin/harness-cli db rebuild --from .harness/changesets
-```
-
-## Minimal Configuration
-
-Symphony reads optional configuration from:
-
-```text
-.harness/symphony.yml
-```
-
-Defaults are usable for local development. To use the first-class Codex adapter:
-
-```yaml
-version: 1
-agent:
-  adapter: codex
-```
-
-Symphony resolves Harness CLI from `repo.harness_cli`, then
-`HARNESS_CLI_PATH`, the repository-local platform binary, and finally `PATH`.
-Pin an explicit executable when the repository-local path is not appropriate:
-
-```yaml
-version: 1
-repo:
-  harness_cli: tools/harness-cli
-```
-
-For a custom one-shot command adapter:
-
-```yaml
-version: 1
-agent:
-  adapter: custom
-  command:
-    - ./scripts/run-agent.sh
-```
-
-Inspect the resolved configuration:
-
-```bash
-target/debug/harness-symphony config show
-```
-
-## The Mental Model
-
-| If you want to... | Run... |
-| --- | --- |
-| Check whether Symphony can run here | `target/debug/harness-symphony doctor` |
-| Find runnable stories | `target/debug/harness-symphony work list` |
-| Create an isolated workspace only | `target/debug/harness-symphony run <story-id> --prepare-only` |
-| Run a normal or high-risk story | `target/debug/harness-symphony run <story-id>` |
-| Run a tiny story in the current checkout | `target/debug/harness-symphony run <story-id> --here` |
-| See what happened locally | `target/debug/harness-symphony status` |
-| Inspect a run | `target/debug/harness-symphony runs show <run_id>` |
-| Create a PR for a finished run | `target/debug/harness-symphony pr create <run_id>` |
-| Apply merged changesets | `target/debug/harness-symphony sync` |
-
-## Common Mistakes
-
-- Do not send normal or high-risk stories through `--here`.
-- Do not edit root `harness.db` to represent run results.
-- Do not copy `harness.db`, `-wal`, or `-shm`; use the protocol snapshot.
-- Do not commit `.symphony/`; it is local runtime state.
-- Do not review only raw changeset JSONL; read `SUMMARY.md` first.
-- Do not forget `sync` after merging a Symphony PR.
-- Do not treat Symphony as a second intake system. Harness chooses story scope
-  and lane; Symphony runs the selected story safely.
+See the repository [`README`](../README.md) for the complete contributor and
+Web UI validation commands.

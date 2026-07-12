@@ -87,7 +87,11 @@ curl -fsSL https://raw.githubusercontent.com/hoangnb24/repository-harness/harnes
       --ref harness-cli-v0.1.14 --yes
 ```
 
-PowerShell uses the same tag with `-Merge -UpgradeCli -Ref
-harness-cli-v0.1.14 -Yes`. Contract discovery is read-only and may run while
-the database is missing; database initialization remains an explicit operator
-action.
+```powershell
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/hoangnb24/repository-harness/harness-cli-v0.1.14/scripts/install-harness.ps1"))) `
+  -Directory 'C:\absolute\repository\path' -Merge -UpgradeCli `
+  -Ref harness-cli-v0.1.14 -Yes
+```
+
+Contract discovery is read-only and may run while the database is missing;
+database initialization remains an explicit operator action.

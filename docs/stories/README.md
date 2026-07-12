@@ -3,7 +3,11 @@
 Stories are work packets. They turn product intent into bounded implementation
 and validation work.
 
-No story packets are active yet.
+Current runnable ownership lives in this repository's local Harness database.
+The E11 target sequence (`US-094` through `US-096`) is the active standalone
+product work. Imported E05–E08 and US-046 packets are historical implementation
+evidence; their Markdown headings do not reactivate durable work. See
+the [imported Symphony history](../history/README.md) for reviewed dispositions.
 
 ## Normal Story
 

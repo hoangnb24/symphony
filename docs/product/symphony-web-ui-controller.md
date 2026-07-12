@@ -1,5 +1,19 @@
 # Symphony Web UI Controller
 
+## Status
+
+Implemented local product contract. The board, task detail, run start and
+recovery APIs, event/review surfaces, PR/sync gates, bounded cards, and Electron
+shell are present and covered by Rust, Web-build, Playwright, and desktop-smoke
+tests. Hosted deployment, multiple active agents, signing, notarization, and
+auto-update remain future work.
+
+Imported story packets are historical evidence, not the active queue. In
+particular, US-061 (terminal TUI) and US-063 (completion alert) are retired;
+US-065 (uncapped Codex lifecycle) and US-066 (failure explanation) are
+implemented despite stale headings in their imported packets. The reviewed
+history is recorded in the [imported Symphony history](../history/README.md).
+
 ## Purpose
 
 The Symphony Web UI Controller gives non-technical users a local browser surface
@@ -205,6 +219,12 @@ review. Build and Playwright checks prove the UI works; desktop/mobile
 screenshots prove the layout fits; Impeccable or equivalent tooling can provide
 design vocabulary, anti-pattern detection, audit, and polish feedback when the
 tool is installed.
+
+Design tooling is an optional external provider, never runtime source. An
+absent provider is a clean skip; a registered-but-missing provider is a
+degraded weak-proof warning. Symphony does not require `.agents`, `.codex`,
+`.impeccable`, or personal design-tool configuration. See
+`docs/OPTIONAL_TOOLING.md`.
 
 ## Codex Event Source
 

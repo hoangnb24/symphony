@@ -482,4 +482,41 @@ auto:
         assert!(error.to_string().contains("config parse failed"));
         assert!(error.to_string().contains(".harness/symphony.yml"));
     }
+
+    #[test]
+    fn shipped_example_parses_and_resolves_all_relative_paths_from_repo_root() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let example_path = manifest_dir.join("../../examples/symphony.yml");
+        let text = fs::read_to_string(&example_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read shipped example {}: {error}",
+                example_path.display()
+            )
+        });
+        let config: SymphonyConfig = serde_yaml::from_str(&text).unwrap_or_else(|error| {
+            panic!(
+                "failed to parse shipped example {}: {error}",
+                example_path.display()
+            )
+        });
+        let root = Path::new("/operator workspace/repository");
+        let resolved = config.resolve(root);
+
+        assert_eq!(resolved.repo_root, root);
+        assert_eq!(resolved.harness_db, root.join("harness.db"));
+        assert_eq!(
+            resolved.harness_cli,
+            Some(root.join("scripts/bin/harness-cli"))
+        );
+        assert_eq!(resolved.state_db, root.join(".symphony/state.db"));
+        assert_eq!(resolved.runs_dir, root.join(".harness/runs"));
+        assert_eq!(resolved.worktrees_dir, root.join(".symphony/worktrees"));
+        assert_eq!(
+            resolved.changeset_directory,
+            root.join(".harness/changesets")
+        );
+        assert_eq!(resolved.agent_adapter, "codex");
+        assert!(resolved.agent_command.is_empty());
+        assert_eq!(resolved.agent_timeout_minutes, 30);
+    }
 }
