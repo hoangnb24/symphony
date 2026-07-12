@@ -25,6 +25,7 @@ pub struct ResolvedConfig {
     pub version: u32,
     pub repo_root: PathBuf,
     pub harness_db: PathBuf,
+    pub harness_cli: Option<PathBuf>,
     pub state_db: PathBuf,
     pub runs_dir: PathBuf,
     pub worktrees_dir: PathBuf,
@@ -74,6 +75,8 @@ pub struct RepoConfig {
     pub root: PathBuf,
     #[serde(default = "default_harness_db")]
     pub harness_db: PathBuf,
+    #[serde(default, alias = "harness_cli_path")]
+    pub harness_cli: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -163,6 +166,7 @@ impl Default for RepoConfig {
         Self {
             root: default_repo_root(),
             harness_db: default_harness_db(),
+            harness_cli: None,
         }
     }
 }
@@ -257,6 +261,11 @@ impl SymphonyConfig {
         ResolvedConfig {
             version: self.version,
             harness_db: normalize_path(&repo_root, &self.repo.harness_db),
+            harness_cli: self
+                .repo
+                .harness_cli
+                .as_ref()
+                .map(|path| normalize_path(&repo_root, path)),
             state_db: normalize_path(&repo_root, &self.symphony.state_db),
             runs_dir: normalize_path(&repo_root, &self.symphony.runs_dir),
             worktrees_dir: normalize_path(&repo_root, &self.symphony.worktrees_dir),
@@ -422,6 +431,7 @@ version: 1
 repo:
   root: "workspace"
   harness_db: "db/copy.db"
+  harness_cli: "tools with spaces/harness-cli"
 agent:
   command:
     - "codex"
@@ -442,6 +452,12 @@ auto:
         assert_eq!(
             resolved.harness_db,
             PathBuf::from("/repo/workspace/db/copy.db")
+        );
+        assert_eq!(
+            resolved.harness_cli,
+            Some(PathBuf::from(
+                "/repo/workspace/tools with spaces/harness-cli"
+            ))
         );
         assert_eq!(resolved.agent_command, vec!["codex", "app-server"]);
         assert_eq!(resolved.compact_keep_last, 10);
@@ -465,5 +481,42 @@ auto:
         let error = SymphonyConfig::load(temp_dir.path()).unwrap_err();
         assert!(error.to_string().contains("config parse failed"));
         assert!(error.to_string().contains(".harness/symphony.yml"));
+    }
+
+    #[test]
+    fn shipped_example_parses_and_resolves_all_relative_paths_from_repo_root() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let example_path = manifest_dir.join("../../examples/symphony.yml");
+        let text = fs::read_to_string(&example_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read shipped example {}: {error}",
+                example_path.display()
+            )
+        });
+        let config: SymphonyConfig = serde_yaml::from_str(&text).unwrap_or_else(|error| {
+            panic!(
+                "failed to parse shipped example {}: {error}",
+                example_path.display()
+            )
+        });
+        let root = Path::new("/operator workspace/repository");
+        let resolved = config.resolve(root);
+
+        assert_eq!(resolved.repo_root, root);
+        assert_eq!(resolved.harness_db, root.join("harness.db"));
+        assert_eq!(
+            resolved.harness_cli,
+            Some(root.join("scripts/bin/harness-cli"))
+        );
+        assert_eq!(resolved.state_db, root.join(".symphony/state.db"));
+        assert_eq!(resolved.runs_dir, root.join(".harness/runs"));
+        assert_eq!(resolved.worktrees_dir, root.join(".symphony/worktrees"));
+        assert_eq!(
+            resolved.changeset_directory,
+            root.join(".harness/changesets")
+        );
+        assert_eq!(resolved.agent_adapter, "codex");
+        assert!(resolved.agent_command.is_empty());
+        assert_eq!(resolved.agent_timeout_minutes, 30);
     }
 }

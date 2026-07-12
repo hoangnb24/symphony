@@ -3,12 +3,13 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::changeset::{render_changeset, render_markdown, ChangesetError};
 use crate::config::ResolvedConfig;
+use crate::harness_protocol::{HarnessProtocol, HarnessProtocolError};
 use crate::pr::{create_pr, PrError};
 use crate::run::{execute_prepared_run, prepare_run, PreparedRun, RunError};
 use crate::state::{RunStateStore, StateError};
@@ -37,6 +38,8 @@ pub enum WebError {
     Json(#[from] serde_json::Error),
     #[error("requested web asset is outside the web UI dist directory")]
     InvalidAssetPath,
+    #[error("invalid packaged resource manifest at {path}: {detail}")]
+    InvalidResourceManifest { path: String, detail: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +206,7 @@ struct SyncChangeResponse {
 }
 
 pub fn run_web_server(config: &ResolvedConfig, options: WebServerOptions) -> Result<(), WebError> {
+    compatible_protocol(config)?;
     let listener = TcpListener::bind(format!("{}:{}", options.host, options.port))?;
     let address = listener.local_addr()?;
     println!("Symphony Web UI Controller listening at http://{address}");
@@ -237,7 +241,8 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse
     match (method.as_deref(), path.as_deref()) {
         (Some("GET"), Some("/health")) => json_response(200, &serde_json::json!({"ok": true})),
         (Some("GET"), Some("/api/board")) => {
-            let items = list_board(&config.harness_db, &config.state_db)?;
+            let protocol = compatible_protocol(config)?;
+            let items = list_board(&protocol, &config.state_db)?;
             let items = items
                 .into_iter()
                 .map(|item| BoardItemResponse::from_item(config, item))
@@ -310,7 +315,11 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse
 }
 
 fn retire_task_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpResponse, WebError> {
-    let item = match list_board(&config.harness_db, &config.state_db)?
+    if let Some(response) = migration_fence_conflict(config)? {
+        return Ok(response);
+    }
+    let protocol = compatible_protocol(config)?;
+    let item = match list_board(&protocol, &config.state_db)?
         .into_iter()
         .find(|item| item.id == story_id)
     {
@@ -332,7 +341,7 @@ fn retire_task_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpR
             },
         );
     }
-    retire_story(&config.harness_db, story_id)?;
+    retire_story(&protocol, story_id)?;
     json_response(
         200,
         &RetireTaskResponse {
@@ -343,7 +352,11 @@ fn retire_task_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpR
 }
 
 fn recover_run_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpResponse, WebError> {
-    let item = match list_board(&config.harness_db, &config.state_db)?
+    if let Some(response) = migration_fence_conflict(config)? {
+        return Ok(response);
+    }
+    let protocol = compatible_protocol(config)?;
+    let item = match list_board(&protocol, &config.state_db)?
         .into_iter()
         .find(|item| item.id == story_id)
     {
@@ -561,6 +574,9 @@ fn pr_retry_response(config: &ResolvedConfig, run_id: &str) -> Result<HttpRespon
 }
 
 fn start_run_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpResponse, WebError> {
+    if let Some(response) = migration_fence_conflict(config)? {
+        return Ok(response);
+    }
     if let Some(active) = RunStateStore::new(config.state_db.clone()).active_run()? {
         return json_response(
             409,
@@ -592,6 +608,26 @@ fn start_run_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpRes
             },
         ),
     }
+}
+
+fn migration_fence_conflict(config: &ResolvedConfig) -> Result<Option<HttpResponse>, WebError> {
+    match RunStateStore::new(config.state_db.clone()).ensure_migration_fence_released() {
+        Ok(()) => Ok(None),
+        Err(error @ StateError::MigrationFenceHeld(_)) => json_response(
+            409,
+            &ErrorResponse {
+                error: error.to_string(),
+            },
+        )
+        .map(Some),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn compatible_protocol(config: &ResolvedConfig) -> Result<HarnessProtocol, WebError> {
+    let protocol = HarnessProtocol::from_config(config).map_err(WorkError::from)?;
+    protocol.preflight().map_err(WorkError::from)?;
+    Ok(protocol)
 }
 
 fn spawn_run(config: ResolvedConfig, prepared: PreparedRun) {
@@ -983,11 +1019,14 @@ fn recovery_action_for_review(
     config: &ResolvedConfig,
     run: &crate::state::RunRecord,
 ) -> Result<Option<RecoveryAction>, WebError> {
-    let items = match list_board(&config.harness_db, &config.state_db) {
-        Ok(items) => items,
-        Err(WorkError::MissingDatabase(_)) => return Ok(None),
-        Err(error) => return Err(error.into()),
+    let protocol = match compatible_protocol(config) {
+        Ok(protocol) => protocol,
+        Err(WebError::Work(WorkError::Protocol(HarnessProtocolError::DatabaseMissing {
+            ..
+        }))) => return Ok(None),
+        Err(error) => return Err(error),
     };
+    let items = list_board(&protocol, &config.state_db)?;
     let item = items.into_iter().find(|item| item.id == run.story_id);
     let Some(item) = item else {
         return Ok(None);
@@ -1268,7 +1307,7 @@ fn json_response<T: Serialize>(status: u16, body: &T) -> Result<HttpResponse, We
 }
 
 fn static_response(config: &ResolvedConfig, request_path: &str) -> Result<HttpResponse, WebError> {
-    let dist_dir = web_dist_dir(config);
+    let dist_dir = web_dist_dir(config)?;
     if !dist_dir.exists() {
         if request_path != "/" {
             return json_response(
@@ -1307,25 +1346,112 @@ fn static_response(config: &ResolvedConfig, request_path: &str) -> Result<HttpRe
     Ok(HttpResponse::new(response))
 }
 
-fn web_dist_dir(config: &ResolvedConfig) -> PathBuf {
-    web_dist_dir_with_override(config, std::env::var_os(WEB_DIST_DIR_ENV))
+#[derive(Debug, Deserialize)]
+struct ResourceManifest {
+    format_version: u32,
+    binary_path: String,
+    web_asset_root: String,
+    web_asset_sha256: String,
 }
 
+fn web_dist_dir(config: &ResolvedConfig) -> Result<PathBuf, WebError> {
+    web_dist_dir_with_paths(
+        config,
+        std::env::var_os(WEB_DIST_DIR_ENV),
+        std::env::current_exe().ok().as_deref(),
+    )
+}
+
+#[cfg(test)]
 fn web_dist_dir_with_override(
     config: &ResolvedConfig,
     override_path: Option<std::ffi::OsString>,
-) -> PathBuf {
+) -> Result<PathBuf, WebError> {
+    web_dist_dir_with_paths(config, override_path, None)
+}
+
+fn web_dist_dir_with_paths(
+    config: &ResolvedConfig,
+    override_path: Option<std::ffi::OsString>,
+    executable: Option<&Path>,
+) -> Result<PathBuf, WebError> {
     if let Some(path) = override_path {
         if !path.is_empty() {
-            return PathBuf::from(path);
+            return Ok(PathBuf::from(path));
         }
     }
-    config
+    if let Some(executable) = executable {
+        if let Some(archive_root) = executable.parent().and_then(Path::parent) {
+            let resource_root = archive_root.join("share/harness-symphony");
+            if resource_root.exists() {
+                return packaged_web_dist(&resource_root, executable, archive_root);
+            }
+        }
+    }
+    if let Some(bundle_dist) = executable
+        .and_then(Path::parent)
+        .map(|directory| directory.join("web-ui-dist"))
+        .filter(|directory| directory.is_dir())
+    {
+        return Ok(bundle_dist);
+    }
+    Ok(config
         .repo_root
         .join("crates")
         .join("harness-symphony")
         .join("web-ui")
-        .join("dist")
+        .join("dist"))
+}
+
+fn packaged_web_dist(
+    resource_root: &Path,
+    executable: &Path,
+    archive_root: &Path,
+) -> Result<PathBuf, WebError> {
+    let manifest_path = resource_root.join("resource-manifest.json");
+    let invalid = |detail: String| WebError::InvalidResourceManifest {
+        path: manifest_path.display().to_string(),
+        detail,
+    };
+    let bytes = fs::read(&manifest_path).map_err(|error| invalid(error.to_string()))?;
+    let manifest: ResourceManifest =
+        serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
+    let expected_binary = executable
+        .strip_prefix(archive_root)
+        .map_err(|_| invalid("backend binary is outside the archive root".to_owned()))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if manifest.format_version != 1 {
+        return Err(invalid("format_version must be 1".to_owned()));
+    }
+    if manifest.binary_path != expected_binary {
+        return Err(invalid(format!(
+            "binary_path must be {expected_binary}, got {}",
+            manifest.binary_path
+        )));
+    }
+    if manifest.web_asset_root != "share/harness-symphony/web-ui" {
+        return Err(invalid(
+            "web_asset_root must be share/harness-symphony/web-ui".to_owned(),
+        ));
+    }
+    if manifest.web_asset_sha256.len() != 64
+        || !manifest
+            .web_asset_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(invalid(
+            "web_asset_sha256 must be a 64-character SHA-256".to_owned(),
+        ));
+    }
+    let dist = archive_root.join(&manifest.web_asset_root);
+    if !dist.join("index.html").is_file() {
+        return Err(invalid(
+            "Web asset root does not contain index.html".to_owned(),
+        ));
+    }
+    Ok(dist)
 }
 
 fn resolve_asset_path(dist_dir: &Path, request_path: &str) -> Result<PathBuf, WebError> {
@@ -1424,7 +1550,49 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn test_config(temp_dir: &tempfile::TempDir) -> ResolvedConfig {
-        SymphonyConfig::default().resolve(temp_dir.path())
+        let cli = temp_dir.path().join("fake-harness-cli");
+        fs::write(&cli, r#"#!/bin/sh
+set -eu
+case "$1 $2 ${3:-}" in
+  "query contract --json")
+    printf '%s\n' '{"protocol_version":1,"operation":"query.contract","request_id":null,"result":{"protocol_version":1,"cli_version":"0.1.14","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]},"error":null}'
+    ;;
+  "query work-graph --json")
+    if sqlite3 "$HARNESS_DB_PATH" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='story'" | grep -q 1; then
+      stories=$(sqlite3 -json "$HARNESS_DB_PATH" "SELECT id,title,risk_lane,NULL AS contract_doc,status,verify_command,(status='planned' AND verify_command IS NOT NULL) AS runnable FROM story ORDER BY id" | sed 's/\"runnable\":1/\"runnable\":true/g;s/\"runnable\":0/\"runnable\":false/g')
+    else
+      stories='[]'
+    fi
+    printf '%s\n' "{\"protocol_version\":1,\"operation\":\"query.work-graph\",\"request_id\":null,\"result\":{\"stories\":$stories,\"dependencies\":[],\"hierarchy\":[],\"revision\":\"fixture\"},\"error\":null}"
+    ;;
+  "story update --id")
+    id=$4; status=$6; expected=$8
+    before=$(sqlite3 "$HARNESS_DB_PATH" "SELECT status FROM story WHERE id='$id'")
+    sqlite3 "$HARNESS_DB_PATH" "UPDATE story SET status='$status' WHERE id='$id' AND status='$expected'"
+    printf '%s\n' "{\"protocol_version\":1,\"operation\":\"story.update\",\"request_id\":null,\"result\":{\"id\":\"$id\",\"before_status\":\"$before\",\"after_status\":\"$status\",\"runnable_before\":true},\"error\":null}"
+    ;;
+  "db changeset status")
+    id=$(basename "$4" .changeset.jsonl)
+    applied=false; [ -f ".applied-$id" ] && applied=true
+    printf '%s\n' "{\"protocol_version\":1,\"operation\":\"db.changeset.status\",\"request_id\":null,\"result\":{\"id\":\"$id\",\"content_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"applied\":$applied,\"operation_count\":2},\"error\":null}"
+    ;;
+  "db changeset apply")
+    id=$(basename "$4" .changeset.jsonl)
+    : > ".applied-$id"
+    printf '%s\n' "$@" >> sync-args.log
+    printf '%s\n' "{\"protocol_version\":1,\"operation\":\"db.changeset.apply\",\"request_id\":null,\"result\":{\"id\":\"$id\",\"content_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"applied\":true,\"operations\":2},\"error\":null}"
+    ;;
+  "db snapshot --output")
+    cp "$HARNESS_DB_PATH" "$4"
+    printf '%s\n' "{\"protocol_version\":1,\"operation\":\"db.snapshot\",\"request_id\":null,\"result\":{\"output\":\"$4\",\"source_logical_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"graph_revision\":\"fixture\",\"snapshot_file_sha256\":\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"},\"error\":null}"
+    ;;
+  *) exit 64 ;;
+esac
+"#).unwrap();
+        make_executable(&cli);
+        let mut config = SymphonyConfig::default().resolve(temp_dir.path());
+        config.harness_cli = Some(cli);
+        config
     }
 
     fn seed_story(db_path: &std::path::Path) {
@@ -1661,6 +1829,46 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 409 Conflict"));
         assert!(response.contains("only Ready stories can be retired"));
+    }
+
+    #[test]
+    fn changed_story_cannot_be_started_or_retired() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        seed_story_with_status(&config.harness_db, "US-CHANGED", "Proxy", "changed");
+
+        let start =
+            handle_request(&config, "POST /api/tasks/US-CHANGED/start HTTP/1.1\r\n\r\n").unwrap();
+        let retire = handle_request(
+            &config,
+            "POST /api/tasks/US-CHANGED/retire HTTP/1.1\r\n\r\n",
+        )
+        .unwrap();
+
+        assert!(start.starts_with("HTTP/1.1 400 Bad Request"));
+        assert!(start.contains("status changed"));
+        assert!(retire.starts_with("HTTP/1.1 409 Conflict"));
+        assert!(retire.contains("only Ready stories can be retired"));
+    }
+
+    #[test]
+    fn web_start_and_retire_fail_closed_while_migration_fence_is_held() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        seed_runnable_story(&config.harness_db, "US-FENCED");
+        RunStateStore::new(config.state_db.clone())
+            .hold_migration_fence("ownership handoff")
+            .unwrap();
+
+        let start =
+            handle_request(&config, "POST /api/tasks/US-FENCED/start HTTP/1.1\r\n\r\n").unwrap();
+        let retire =
+            handle_request(&config, "POST /api/tasks/US-FENCED/retire HTTP/1.1\r\n\r\n").unwrap();
+
+        assert!(start.starts_with("HTTP/1.1 409 Conflict"));
+        assert!(start.contains("migration fence is held"));
+        assert!(retire.starts_with("HTTP/1.1 409 Conflict"));
+        assert!(retire.contains("migration fence is held"));
     }
 
     #[test]
@@ -2294,7 +2502,7 @@ mod tests {
     fn root_serves_built_web_ui_index() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = test_config(&temp_dir);
-        let dist = web_dist_dir(&config);
+        let dist = web_dist_dir(&config).unwrap();
         fs::create_dir_all(&dist).unwrap();
         fs::write(dist.join("index.html"), "<div id=\"root\"></div>").unwrap();
 
@@ -2309,7 +2517,7 @@ mod tests {
     fn static_assets_are_served_as_raw_bytes() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = test_config(&temp_dir);
-        let dist = web_dist_dir(&config);
+        let dist = web_dist_dir(&config).unwrap();
         fs::create_dir_all(&dist).unwrap();
         let asset = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00];
         fs::write(dist.join("icon.png"), asset).unwrap();
@@ -2328,9 +2536,86 @@ mod tests {
         let config = test_config(&temp_dir);
         let override_dir = temp_dir.path().join("packaged-web-ui-dist");
 
-        let dist = web_dist_dir_with_override(&config, Some(override_dir.clone().into_os_string()));
+        let dist = web_dist_dir_with_override(&config, Some(override_dir.clone().into_os_string()))
+            .unwrap();
 
         assert_eq!(dist, override_dir);
+    }
+
+    #[test]
+    fn web_dist_dir_uses_assets_beside_standalone_executable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        let bundle = temp_dir.path().join("third-directory");
+        let dist = bundle.join("web-ui-dist");
+        fs::create_dir_all(&dist).unwrap();
+        let executable = bundle.join(if cfg!(windows) {
+            "harness-symphony.exe"
+        } else {
+            "harness-symphony"
+        });
+
+        let selected = web_dist_dir_with_paths(&config, None, Some(&executable)).unwrap();
+
+        assert_eq!(selected, dist);
+    }
+
+    #[test]
+    fn web_dist_dir_falls_back_to_development_tree_when_bundle_assets_are_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        let executable = temp_dir.path().join("bundle/harness-symphony");
+
+        let selected = web_dist_dir_with_paths(&config, None, Some(&executable)).unwrap();
+
+        assert_eq!(
+            selected,
+            config.repo_root.join("crates/harness-symphony/web-ui/dist")
+        );
+    }
+
+    #[test]
+    fn web_dist_dir_validates_production_archive_resource_manifest() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        let executable = temp_dir.path().join(if cfg!(windows) {
+            "bin/harness-symphony.exe"
+        } else {
+            "bin/harness-symphony"
+        });
+        let resources = temp_dir.path().join("share/harness-symphony");
+        let dist = resources.join("web-ui");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(dist.join("index.html"), "<div id=\"root\"></div>").unwrap();
+        fs::write(
+            resources.join("resource-manifest.json"),
+            serde_json::json!({
+                "format_version": 1,
+                "binary_path": if cfg!(windows) { "bin/harness-symphony.exe" } else { "bin/harness-symphony" },
+                "web_asset_root": "share/harness-symphony/web-ui",
+                "web_asset_sha256": "a".repeat(64)
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let selected = web_dist_dir_with_paths(&config, None, Some(&executable)).unwrap();
+
+        assert_eq!(selected, dist);
+    }
+
+    #[test]
+    fn web_dist_dir_rejects_invalid_production_resource_manifest_without_fallback() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        let executable = temp_dir.path().join("bin/harness-symphony");
+        let resources = temp_dir.path().join("share/harness-symphony");
+        fs::create_dir_all(resources.join("web-ui")).unwrap();
+        fs::write(resources.join("resource-manifest.json"), "{}").unwrap();
+
+        let error = web_dist_dir_with_paths(&config, None, Some(&executable)).unwrap_err();
+
+        assert!(matches!(error, WebError::InvalidResourceManifest { .. }));
     }
 
     #[test]

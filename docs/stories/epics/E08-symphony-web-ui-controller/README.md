@@ -1,5 +1,9 @@
 # E08 Symphony Web UI Controller
 
+> Historical import: packet status in this source-era index is not current-work
+> authority. US-061/US-063 are retired; US-065/US-066 are implemented despite
+> stale packets. See [`../../../history/README.md`](../../../history/README.md).
+
 ## Goal
 
 Build the local browser controller described in

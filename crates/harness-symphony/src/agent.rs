@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::config::ResolvedConfig;
+use crate::harness_protocol::{resolve_executable, HarnessProtocolError};
 use crate::run::PreparedRun;
 
 #[cfg(not(test))]
@@ -20,6 +21,8 @@ const CODEX_IDLE_RECONCILE_SECONDS: u64 = 1;
 pub enum AgentError {
     #[error("agent.command is not configured. Set agent.command in .harness/symphony.yml.")]
     MissingCommand,
+    #[error("selected agent executable '{0}' is not available; install it or configure agent.command before launching a run")]
+    UnavailableCommand(String),
     #[error("unsupported agent adapter '{0}'. Supported adapters: custom, codex")]
     UnsupportedAdapter(String),
     #[error("agent command failed with status {status}: {stderr}")]
@@ -30,6 +33,8 @@ pub enum AgentError {
     Io(#[from] std::io::Error),
     #[error("agent json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Protocol(#[from] HarnessProtocolError),
 }
 
 pub fn run_agent(config: &ResolvedConfig, prepared: &PreparedRun) -> Result<(), AgentError> {
@@ -54,18 +59,92 @@ pub fn agent_adapter_status(config: &ResolvedConfig) -> Result<String, AgentErro
     match config.agent_adapter.as_str() {
         "custom" => {
             let command = resolved_agent_command(config);
-            if command.is_empty() {
-                Err(AgentError::MissingCommand)
-            } else {
-                Ok(format!("custom command: {}", command.join(" ")))
-            }
+            validate_agent_command(config, &command)?;
+            Ok(format!("custom command: {}", command.join(" ")))
         }
-        "codex" => Ok(format!(
-            "codex app-server command: {}; runtime: uncapped",
-            resolved_agent_command(config).join(" ")
-        )),
+        "codex" => {
+            let command = resolved_agent_command(config);
+            validate_agent_command(config, &command)?;
+            Ok(format!(
+                "codex app-server command: {}; runtime: uncapped",
+                command.join(" ")
+            ))
+        }
         other => Err(AgentError::UnsupportedAdapter(other.to_owned())),
     }
+}
+
+/// Validate the selected execution adapter before run preparation creates a
+/// branch, worktree, snapshot, or local state row. Prepare-only deliberately
+/// does not call this function because it does not launch an agent.
+pub fn preflight_agent(config: &ResolvedConfig) -> Result<(), AgentError> {
+    agent_adapter_status(config).map(|_| ())
+}
+
+fn validate_agent_command(config: &ResolvedConfig, command: &[String]) -> Result<(), AgentError> {
+    let Some(executable) = command.first() else {
+        return Err(AgentError::MissingCommand);
+    };
+    if executable_available(executable, &config.repo_root) {
+        Ok(())
+    } else {
+        Err(AgentError::UnavailableCommand(executable.clone()))
+    }
+}
+
+fn executable_available(executable: &str, repo_root: &Path) -> bool {
+    let path = Path::new(executable);
+    if path.is_absolute() {
+        return is_executable_file(path);
+    }
+    if path.components().count() > 1 {
+        return is_executable_file(&repo_root.join(path));
+    }
+    let Some(search_path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    executable_candidates(executable).iter().any(|name| {
+        std::env::split_paths(&search_path)
+            .any(|directory| is_executable_file(&directory.join(name)))
+    })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(windows)]
+    {
+        true
+    }
+}
+
+fn executable_candidates(executable: &str) -> Vec<PathBuf> {
+    #[cfg(not(windows))]
+    let candidates = vec![PathBuf::from(executable)];
+    #[cfg(windows)]
+    let mut candidates = vec![PathBuf::from(executable)];
+    #[cfg(windows)]
+    if Path::new(executable).extension().is_none() {
+        let extensions = std::env::var_os("PATHEXT")
+            .and_then(|value| value.into_string().ok())
+            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_owned());
+        candidates.extend(
+            extensions
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| PathBuf::from(format!("{executable}{extension}"))),
+        );
+    }
+    candidates
 }
 
 fn run_custom_agent(config: &ResolvedConfig, prepared: &PreparedRun) -> Result<(), AgentError> {
@@ -330,6 +409,7 @@ fn base_command(command: &[String], prepared: &PreparedRun) -> Command {
     process
         .args(&command[1..])
         .current_dir(&prepared.worktree)
+        .env("HARNESS_REPO_ROOT", &prepared.worktree)
         .env("HARNESS_DB_PATH", &prepared.harness_db_path)
         .env("HARNESS_RUN_ID", &prepared.run_id)
         .env("HARNESS_RUN_MODE", "execute");
@@ -371,7 +451,7 @@ fn send_turn_start(
                 "input": [
                     {
                         "type": "text",
-                        "text": codex_prompt(config, prepared),
+                        "text": codex_prompt(config, prepared)?,
                         "text_elements": []
                     }
                 ]
@@ -420,21 +500,25 @@ fn turn_error_from_query<'a>(message: &'a Value, turn_id: &str) -> Option<&'a st
         .and_then(Value::as_str)
 }
 
-fn codex_prompt(config: &ResolvedConfig, prepared: &PreparedRun) -> String {
-    let harness_cli = config.repo_root.join("scripts/bin/harness-cli");
-    format!(
-        "You are running inside a Harness Symphony worktree. Read AGENTS.md and the run contract at {}. Complete only story {} for run {}. Do not change unrelated product code. Write all required artifacts under the current working directory: .harness/runs/{}/SUMMARY.md and .harness/runs/{}/RESULT.json. Use Harness CLI writes with HARNESS_DB_PATH, HARNESS_RUN_ID, and HARNESS_RUN_MODE from the environment so .harness/changesets/{}.changeset.jsonl is produced in this worktree. If scripts/bin/harness-cli is absent in the worktree, run the root binary at {} while keeping the current worktree as cwd. RESULT.json must have version 1, run_id {}, story_id {}, an allowed outcome, summary_path .harness/runs/{}/SUMMARY.md, and a top-level validation object. Do not write validation_evidence. validation must be either {{\"commands\":[{{\"command\":\"exact command\",\"result\":\"pass\"}}]}} with each result set to pass, fail, or unavailable, or {{\"unavailable\":\"non-empty reason\"}}.",
+fn codex_prompt(config: &ResolvedConfig, prepared: &PreparedRun) -> Result<String, AgentError> {
+    let executable = resolve_executable(config.harness_cli.as_deref(), &config.repo_root)?;
+    let harness_command = serde_json::to_string(&json!({
+        "executable": executable,
+        "argv": Vec::<String>::new(),
+    }))?;
+    Ok(format!(
+        "You are running inside a Harness Symphony worktree. Read AGENTS.md and the run contract at {}. Complete only story {} for run {}. Do not change unrelated product code. Write all required artifacts under the current working directory: .harness/runs/{}/SUMMARY.md and .harness/runs/{}/RESULT.json. Use the structured Harness CLI command {} by executing its executable directly and appending each required CLI argument to argv; never shell-split or substitute a fixed repository path. Keep the current worktree as cwd and use HARNESS_DB_PATH, HARNESS_RUN_ID, and HARNESS_RUN_MODE from the environment so .harness/changesets/{}.changeset.jsonl is produced in this worktree. RESULT.json must have version 1, run_id {}, story_id {}, an allowed outcome, summary_path .harness/runs/{}/SUMMARY.md, and a top-level validation object. Do not write validation_evidence. validation must be either {{\"commands\":[{{\"command\":\"exact command\",\"result\":\"pass\"}}]}} with each result set to pass, fail, or unavailable, or {{\"unavailable\":\"non-empty reason\"}}.",
         prepared.contract_path.display(),
         prepared.story_id,
         prepared.run_id,
         prepared.run_id,
         prepared.run_id,
+        harness_command,
         prepared.run_id,
-        harness_cli.display(),
         prepared.run_id,
         prepared.story_id,
         prepared.run_id
-    )
+    ))
 }
 
 fn terminate_child(child: &mut std::process::Child) {
@@ -455,14 +539,37 @@ mod tests {
     use super::*;
     use crate::config::ResolvedConfig;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+
+    #[cfg(unix)]
+    fn install_protocol_cli(temp: &tempfile::TempDir, config: &mut ResolvedConfig) {
+        let cli = temp.path().join("fake-harness-cli");
+        fs::write(&cli, r#"#!/bin/sh
+printf '%s\n' '{"protocol_version":1,"operation":"query.contract","request_id":null,"result":{"protocol_version":1,"cli_version":"0.1.14","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]},"error":null}'
+"#).unwrap();
+        make_executable(&cli);
+        config.harness_cli = Some(cli);
+        config.repo_root = temp.path().to_path_buf();
+        config.harness_db = temp.path().join("harness.db");
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
 
     fn config(adapter: &str, command: Vec<&str>) -> ResolvedConfig {
         ResolvedConfig {
             version: 1,
             repo_root: Path::new("/repo").to_path_buf(),
             harness_db: Path::new("/repo/harness.db").to_path_buf(),
+            harness_cli: None,
             state_db: Path::new("/repo/.symphony/state.db").to_path_buf(),
             runs_dir: Path::new("/repo/.harness/runs").to_path_buf(),
             worktrees_dir: Path::new("/repo/.symphony/worktrees").to_path_buf(),
@@ -505,6 +612,13 @@ mod tests {
             resolved_agent_command(&config),
             vec!["codex".to_owned(), "app-server".to_owned()]
         );
+    }
+
+    #[test]
+    fn available_codex_adapter_reports_selected_command() {
+        let executable = std::env::current_exe().unwrap().display().to_string();
+        let config = config("codex", vec![&executable]);
+
         assert!(agent_adapter_status(&config)
             .unwrap()
             .contains("codex app-server"));
@@ -521,20 +635,95 @@ mod tests {
     }
 
     #[test]
+    fn selected_missing_agent_executable_fails_preflight() {
+        let config = config("custom", vec!["symphony-agent-that-does-not-exist"]);
+
+        assert!(matches!(
+            preflight_agent(&config).unwrap_err(),
+            AgentError::UnavailableCommand(command)
+                if command == "symphony-agent-that-does-not-exist"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_non_executable_agent_file_fails_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("not-executable-agent");
+        fs::write(&path, "fixture").unwrap();
+        let executable = path.display().to_string();
+        let config = config("custom", vec![&executable]);
+
+        assert!(matches!(
+            preflight_agent(&config).unwrap_err(),
+            AgentError::UnavailableCommand(command) if command == executable
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_process_receives_explicit_worktree_repository_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree with spaces");
+        fs::create_dir_all(&worktree).unwrap();
+        let prepared = PreparedRun {
+            run_id: "run_env".to_owned(),
+            story_id: "US-ENV".to_owned(),
+            branch: None,
+            worktree: worktree.clone(),
+            contract_path: worktree.join("RUN_CONTRACT.json"),
+            harness_db_path: worktree.join("harness.db"),
+            lightweight: false,
+        };
+        let output = base_command(
+            &[
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "printf '%s\\n%s\\n%s\\n' \"$PWD\" \"$HARNESS_REPO_ROOT\" \"$HARNESS_DB_PATH\""
+                    .to_owned(),
+            ],
+            &prepared,
+        )
+        .output()
+        .unwrap();
+
+        assert!(output.status.success());
+        let lines = String::from_utf8(output.stdout).unwrap();
+        let values = lines.lines().collect::<Vec<_>>();
+        assert_eq!(values.len(), 3);
+        assert_eq!(
+            fs::canonicalize(values[0]).unwrap(),
+            fs::canonicalize(&worktree).unwrap()
+        );
+        assert_eq!(values[1], worktree.to_string_lossy());
+        assert_eq!(values[2], prepared.harness_db_path.to_string_lossy());
+    }
+
+    #[test]
     fn codex_prompt_points_to_worktree_artifacts_and_run_env() {
-        let config = config("codex", vec![]);
-        let prompt = codex_prompt(&config, &prepared());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cli = temp_dir.path().join("Harness CLI with spaces");
+        fs::write(&cli, "#!/bin/sh\n").unwrap();
+        make_executable(&cli);
+        let mut config = config("codex", vec![]);
+        config.repo_root = temp_dir.path().to_path_buf();
+        config.harness_cli = Some(cli.clone());
+        let prompt = codex_prompt(&config, &prepared()).unwrap();
 
         assert!(prompt.contains("US-046"));
         assert!(prompt.contains(".harness/runs/run_1/SUMMARY.md"));
         assert!(prompt.contains(".harness/changesets/run_1.changeset.jsonl"));
-        assert!(prompt.contains("/repo/scripts/bin/harness-cli"));
+        assert!(prompt.contains("\"executable\""));
+        assert!(prompt.contains("\"argv\":[]"));
+        assert!(prompt.contains("Harness CLI with spaces"));
+        assert!(!prompt.contains("scripts/bin/harness-cli"));
         assert!(prompt.contains("HARNESS_DB_PATH"));
         assert!(prompt.contains("top-level validation object"));
         assert!(prompt.contains("Do not write validation_evidence"));
         assert!(prompt.contains("\"result\":\"pass\""));
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_completes_json_rpc_handshake() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -556,11 +745,10 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
 "#,
         )
         .unwrap();
-        let mut permissions = fs::metadata(&fake_server).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_server, permissions).unwrap();
+        make_executable(&fake_server);
 
         let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
+        install_protocol_cli(&temp_dir, &mut config);
         config.agent_timeout_minutes = 1;
         let mut prepared = prepared();
         prepared.worktree = worktree.clone();
@@ -570,6 +758,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
         run_codex_agent(&config, &prepared).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_does_not_use_agent_timeout_as_wall_clock_deadline() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -594,11 +783,10 @@ printf '%s\n' '{"id":4,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"
 "#,
         )
         .unwrap();
-        let mut permissions = fs::metadata(&fake_server).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_server, permissions).unwrap();
+        make_executable(&fake_server);
 
         let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
+        install_protocol_cli(&temp_dir, &mut config);
         config.agent_timeout_minutes = 0;
         let mut prepared = prepared();
         prepared.worktree = worktree.clone();
@@ -608,6 +796,7 @@ printf '%s\n' '{"id":4,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"
         run_codex_agent(&config, &prepared).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_reports_failed_terminal_turn() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -628,11 +817,10 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
 "#,
         )
         .unwrap();
-        let mut permissions = fs::metadata(&fake_server).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_server, permissions).unwrap();
+        make_executable(&fake_server);
 
-        let config = config("codex", vec![fake_server.to_str().unwrap()]);
+        let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
+        install_protocol_cli(&temp_dir, &mut config);
         let mut prepared = prepared();
         prepared.worktree = worktree.clone();
         prepared.harness_db_path = worktree.join("harness.db");
@@ -642,6 +830,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
         assert!(error.to_string().contains("turn status was failed: boom"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_recovers_completed_turn_from_state_query() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -664,11 +853,10 @@ printf '%s\n' '{"id":3,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"
 "#,
         )
         .unwrap();
-        let mut permissions = fs::metadata(&fake_server).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_server, permissions).unwrap();
+        make_executable(&fake_server);
 
         let mut config = config("codex", vec![fake_server.to_str().unwrap()]);
+        install_protocol_cli(&temp_dir, &mut config);
         config.agent_timeout_minutes = 1;
         let mut prepared = prepared();
         prepared.worktree = worktree.clone();

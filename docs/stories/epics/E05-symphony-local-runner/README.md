@@ -1,5 +1,9 @@
 # E05 Symphony Local Runner
 
+> Historical import: this delivered-epic summary was imported from
+> `repository-harness` and is evidence, not an active target work queue. See
+> [`../../../history/README.md`](../../../history/README.md).
+
 ## Goal
 
 Build the first useful `harness-symphony` workbench: doctor, work discovery,

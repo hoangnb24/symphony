@@ -1,5 +1,9 @@
 # E07 Symphony Automation
 
+> Historical import: this mixed delivery/planning summary was imported from
+> `repository-harness`; confirm target code and Harness state before creating
+> work from it. See [`../../../history/README.md`](../../../history/README.md).
+
 ## Goal
 
 Add automation only after the local Symphony workbench and review/sync loop are

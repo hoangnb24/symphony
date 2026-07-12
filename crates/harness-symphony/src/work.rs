@@ -1,19 +1,17 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use rusqlite::{params, Connection};
 use thiserror::Error;
 
+use crate::harness_protocol::{HarnessProtocol, HarnessProtocolError, Story};
 use crate::state::{RunRecord, RunStateStore, StateError};
 
 #[derive(Debug, Error)]
 pub enum WorkError {
-    #[error("harness database not found at {0}. Run: scripts/bin/harness-cli init")]
-    MissingDatabase(String),
     #[error("story {0} not found")]
     StoryNotFound(String),
-    #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    #[error("{0}")]
+    Protocol(#[from] HarnessProtocolError),
     #[error("{0}")]
     State(#[from] StateError),
 }
@@ -90,12 +88,12 @@ pub trait WorkSource {
 }
 
 pub struct HarnessDbWorkSource<'a> {
-    db_path: &'a Path,
+    protocol: &'a HarnessProtocol,
 }
 
 impl<'a> HarnessDbWorkSource<'a> {
-    pub fn new(db_path: &'a Path) -> Self {
-        Self { db_path }
+    pub fn new(protocol: &'a HarnessProtocol) -> Self {
+        Self { protocol }
     }
 }
 
@@ -105,7 +103,7 @@ impl WorkSource for HarnessDbWorkSource<'_> {
     }
 
     fn poll(&self) -> Result<Vec<WorkCandidate>, WorkError> {
-        Ok(list_work(self.db_path)?
+        Ok(list_work(self.protocol)?
             .into_iter()
             .filter(is_auto_eligible)
             .map(|item| WorkCandidate {
@@ -119,34 +117,35 @@ impl WorkSource for HarnessDbWorkSource<'_> {
 pub const EXTERNAL_WORK_SOURCE_BOUNDARIES: &[&str] =
     &["github-issues", "linear", "jira", "remote-harness"];
 
-pub fn list_work(db_path: &Path) -> Result<Vec<WorkItem>, WorkError> {
-    if !db_path.exists() {
-        return Err(WorkError::MissingDatabase(db_path.display().to_string()));
-    }
-    let connection = Connection::open(db_path)?;
-    let mut statement = connection.prepare(
-        "SELECT id, status, risk_lane, verify_command
-         FROM story
-         ORDER BY id;",
-    )?;
-    let rows = statement.query_map(params![], |row| {
-        let id = row.get::<_, String>(0)?;
-        let status = row.get::<_, String>(1)?;
-        let lane = row.get::<_, String>(2)?;
-        let verify_command = row.get::<_, Option<String>>(3)?;
-        Ok(classify(id, status, lane, verify_command))
-    })?;
-
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(WorkError::from)
+pub fn list_work(protocol: &HarnessProtocol) -> Result<Vec<WorkItem>, WorkError> {
+    let mut items = protocol
+        .work_graph()?
+        .stories
+        .into_iter()
+        .map(|story| {
+            classify(
+                story.id,
+                story.status,
+                story.risk_lane,
+                story.verify_command,
+                story.runnable,
+            )
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(items)
 }
 
-pub fn list_board(harness_db: &Path, state_db: &Path) -> Result<Vec<BoardItem>, WorkError> {
-    if !harness_db.exists() {
-        return Err(WorkError::MissingDatabase(harness_db.display().to_string()));
-    }
-    let connection = Connection::open(harness_db)?;
-    let stories = load_story_rows(&connection)?;
+pub fn list_board(
+    protocol: &HarnessProtocol,
+    state_db: &Path,
+) -> Result<Vec<BoardItem>, WorkError> {
+    let graph = protocol.work_graph()?;
+    let stories = graph
+        .stories
+        .into_iter()
+        .map(StoryRow::from)
+        .collect::<Vec<_>>();
     let stories = stories
         .into_iter()
         .filter(|story| story.status != "retired")
@@ -155,10 +154,20 @@ pub fn list_board(harness_db: &Path, state_db: &Path) -> Result<Vec<BoardItem>, 
         .iter()
         .map(|story| story.id.clone())
         .collect::<HashSet<_>>();
-    let dependencies = load_dependency_edges(&connection, &story_ids)?;
+    let dependencies = graph
+        .dependencies
+        .into_iter()
+        .map(|edge| (edge.blocker, edge.blocked))
+        .filter(|(blocker, blocked)| story_ids.contains(blocker) && story_ids.contains(blocked))
+        .collect::<Vec<_>>();
     let blockers_by_story = blockers_by_story(&dependencies);
     let unblocks_by_story = unblocks_by_story(&dependencies);
-    let hierarchy = load_hierarchy_edges(&connection, &story_ids)?;
+    let hierarchy = graph
+        .hierarchy
+        .into_iter()
+        .map(|edge| (edge.parent, edge.child))
+        .filter(|(parent, child)| story_ids.contains(parent) && story_ids.contains(child))
+        .collect::<Vec<_>>();
     let parent_by_child = parent_by_child(&hierarchy);
     let children_by_parent = children_by_parent(&hierarchy);
     let cycle_members = cycle_members(&story_ids, &dependencies);
@@ -217,30 +226,33 @@ pub fn list_board(harness_db: &Path, state_db: &Path) -> Result<Vec<BoardItem>, 
     Ok(items)
 }
 
-pub fn retire_story(harness_db: &Path, story_id: &str) -> Result<(), WorkError> {
-    if !harness_db.exists() {
-        return Err(WorkError::MissingDatabase(harness_db.display().to_string()));
-    }
-    let connection = Connection::open(harness_db)?;
-    connection.execute(
-        "UPDATE story SET status='retired' WHERE id=?1;",
-        params![story_id],
-    )?;
-    if connection.changes() == 0 {
-        return Err(WorkError::StoryNotFound(story_id.to_owned()));
-    }
+pub fn retire_story(protocol: &HarnessProtocol, story_id: &str) -> Result<(), WorkError> {
+    let graph = protocol.work_graph()?;
+    let story = graph
+        .stories
+        .iter()
+        .find(|story| story.id == story_id)
+        .ok_or_else(|| WorkError::StoryNotFound(story_id.to_owned()))?;
+    protocol.compare_and_set_status(story_id, &story.status, "retired", true)?;
     Ok(())
 }
 
-fn classify(id: String, status: String, lane: String, verify_command: Option<String>) -> WorkItem {
+fn classify(
+    id: String,
+    status: String,
+    lane: String,
+    verify_command: Option<String>,
+    protocol_runnable: bool,
+) -> WorkItem {
     let has_verify = verify_command
         .as_deref()
         .map(str::trim)
         .is_some_and(|value| !value.is_empty());
     let verify = if has_verify { "configured" } else { "missing" }.to_owned();
     let (runnable, reason) = match status.as_str() {
-        "planned" | "in_progress" if has_verify => ("yes", "ready"),
-        "planned" | "in_progress" => ("warn", "proof command missing"),
+        "planned" | "in_progress" if protocol_runnable => ("yes", "ready"),
+        "planned" | "in_progress" if !has_verify => ("warn", "proof command missing"),
+        "planned" | "in_progress" => ("no", "not runnable by Harness protocol"),
         "implemented" => ("no", "already implemented"),
         "retired" => ("no", "retired"),
         "changed" => ("warn", "changed story needs human review"),
@@ -257,81 +269,15 @@ fn classify(id: String, status: String, lane: String, verify_command: Option<Str
     }
 }
 
-fn load_story_rows(connection: &Connection) -> Result<Vec<StoryRow>, WorkError> {
-    let mut statement = connection.prepare(
-        "SELECT id, title, status, risk_lane, verify_command
-         FROM story
-         ORDER BY id;",
-    )?;
-    let rows = statement.query_map(params![], |row| {
-        Ok(StoryRow {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            status: row.get(2)?,
-            lane: row.get(3)?,
-            verify_command: row.get(4)?,
-        })
-    })?;
-
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(WorkError::from)
-}
-
-fn load_dependency_edges(
-    connection: &Connection,
-    story_ids: &HashSet<String>,
-) -> Result<Vec<(String, String)>, WorkError> {
-    if !table_exists(connection, "story_dependency")? {
-        return Ok(Vec::new());
-    }
-    let mut statement = connection.prepare(
-        "SELECT story_id, blocks_story_id
-         FROM story_dependency
-         ORDER BY story_id, blocks_story_id;",
-    )?;
-    let rows = statement.query_map(params![], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    let edges = rows
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|(blocker, blocked)| story_ids.contains(blocker) && story_ids.contains(blocked))
-        .collect();
-    Ok(edges)
-}
-
-fn load_hierarchy_edges(
-    connection: &Connection,
-    story_ids: &HashSet<String>,
-) -> Result<Vec<(String, String)>, WorkError> {
-    if !table_exists(connection, "story_hierarchy")? {
-        return Ok(Vec::new());
-    }
-    let mut statement = connection.prepare(
-        "SELECT parent_story_id, child_story_id
-         FROM story_hierarchy
-         ORDER BY parent_story_id, child_story_id;",
-    )?;
-    let rows = statement.query_map(params![], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    Ok(rows
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|(parent, child)| story_ids.contains(parent) && story_ids.contains(child))
-        .collect())
-}
-
-fn table_exists(connection: &Connection, table: &str) -> Result<bool, WorkError> {
-    let exists = connection.query_row(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1;",
-        params![table],
-        |_| Ok(()),
-    );
-    match exists {
-        Ok(()) => Ok(true),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
-        Err(error) => Err(WorkError::Sqlite(error)),
+impl From<Story> for StoryRow {
+    fn from(story: Story) -> Self {
+        Self {
+            id: story.id,
+            title: story.title,
+            status: story.status,
+            lane: story.risk_lane,
+            verify_command: story.verify_command,
+        }
     }
 }
 
@@ -474,6 +420,11 @@ fn derive_board_item(story: StoryRow, derivation: BoardDerivation<'_>) -> BoardI
 
     let (board_state, reason) = if story.status == "implemented" {
         (BoardState::Done, "story implemented".to_owned())
+    } else if story.status == "changed" {
+        (
+            BoardState::NeedsAttention,
+            "changed story needs human review".to_owned(),
+        )
     } else if derivation.in_cycle {
         (
             BoardState::Blocked,
@@ -509,7 +460,7 @@ fn derive_board_item(story: StoryRow, derivation: BoardDerivation<'_>) -> BoardI
             BoardState::Blocked,
             format!("waiting for {}", incomplete_blockers.join(", ")),
         )
-    } else if matches!(story.status.as_str(), "planned" | "in_progress" | "changed") {
+    } else if matches!(story.status.as_str(), "planned" | "in_progress") {
         (BoardState::Ready, "ready".to_owned())
     } else if story.status == "retired" {
         (BoardState::Done, "retired".to_owned())
@@ -558,368 +509,89 @@ fn is_auto_eligible(item: &WorkItem) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+mod protocol_tests {
     use super::*;
-    use crate::state::{NewRunRecord, RunStateStore};
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
     use std::path::PathBuf;
 
-    fn create_harness_db(
-        temp_dir: &tempfile::TempDir,
-        with_dependencies: bool,
-    ) -> std::path::PathBuf {
-        let db_path = temp_dir.path().join("harness.db");
-        let connection = Connection::open(&db_path).unwrap();
-        let dependency_sql = if with_dependencies {
-            "CREATE TABLE story_dependency (
-                story_id TEXT NOT NULL,
-                blocks_story_id TEXT NOT NULL,
-                PRIMARY KEY (story_id, blocks_story_id),
-                CHECK (story_id <> blocks_story_id)
-            );"
-        } else {
-            ""
-        };
-        connection
-            .execute_batch(&format!(
-                "CREATE TABLE story (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    risk_lane TEXT NOT NULL,
-                    verify_command TEXT
-                );
-                CREATE TABLE story_hierarchy (
-                    parent_story_id TEXT NOT NULL,
-                    child_story_id TEXT NOT NULL,
-                    PRIMARY KEY (parent_story_id, child_story_id),
-                    CHECK (parent_story_id <> child_story_id)
-                );
-                {dependency_sql}"
-            ))
-            .unwrap();
-        db_path
-    }
+    #[cfg(unix)]
+    fn fake_protocol(temp: &tempfile::TempDir) -> (HarnessProtocol, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
 
-    fn insert_story(db_path: &Path, id: &str, status: &str) {
-        let connection = Connection::open(db_path).unwrap();
-        connection
-            .execute(
-                "INSERT INTO story (id, title, status, risk_lane, verify_command)
-                 VALUES (?1, ?2, ?3, 'normal', 'cargo test');",
-                params![id, format!("{id} title"), status],
-            )
-            .unwrap();
-    }
-
-    fn insert_dependency(db_path: &Path, blocker: &str, blocked: &str) {
-        let connection = Connection::open(db_path).unwrap();
-        connection
-            .execute(
-                "INSERT INTO story_dependency (story_id, blocks_story_id)
-                 VALUES (?1, ?2);",
-                params![blocker, blocked],
-            )
-            .unwrap();
-    }
-
-    fn insert_hierarchy(db_path: &Path, parent: &str, child: &str) {
-        let connection = Connection::open(db_path).unwrap();
-        connection
-            .execute(
-                "INSERT INTO story_hierarchy (parent_story_id, child_story_id)
-                 VALUES (?1, ?2);",
-                params![parent, child],
-            )
-            .unwrap();
-    }
-
-    fn add_run(
-        state_db: PathBuf,
-        story_id: &str,
-        run_id: &str,
-        status: &str,
-        sync_status: &str,
-        pr_url: Option<&str>,
-    ) {
-        let store = RunStateStore::new(state_db);
-        store
-            .add_run(NewRunRecord {
-                run_id: run_id.to_owned(),
-                story_id: story_id.to_owned(),
-                branch: Some(format!("symphony/{run_id}")),
-                worktree: PathBuf::from(format!(".symphony/worktrees/{run_id}")),
-                lightweight: false,
-                status: status.to_owned(),
-                result_path: Some(PathBuf::from(format!(".harness/runs/{run_id}/RESULT.json"))),
-                sync_status: sync_status.to_owned(),
-                next_action: "inspect run".to_owned(),
-            })
-            .unwrap();
-        if let Some(url) = pr_url {
-            store.update_pr_url(run_id, url).unwrap();
-        }
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let executable = temp.path().join("fake-harness-cli");
+        let count = repo.join("invocations");
+        fs::write(
+            &executable,
+            r#"#!/bin/sh
+set -eu
+printf '1\n' >> "$PWD/invocations"
+if [ "$1 $2 $3" = "query work-graph --json" ]; then
+  printf '%s\n' '{"protocol_version":1,"operation":"query.work-graph","request_id":"fixture","result":{"stories":[{"id":"US-BLOCKER","title":"blocker","risk_lane":"normal","contract_doc":null,"status":"planned","verify_command":"cargo test","runnable":true},{"id":"US-CHANGED","title":"changed","risk_lane":"normal","contract_doc":null,"status":"changed","verify_command":"cargo test","runnable":false},{"id":"US-DONE","title":"done","risk_lane":"normal","contract_doc":null,"status":"implemented","verify_command":"cargo test","runnable":false}],"dependencies":[{"blocker":"US-BLOCKER","blocked":"US-CHANGED"}],"hierarchy":[],"revision":"fixture-revision"},"error":null}'
+elif [ "$1 $2" = "story update" ]; then
+  [ "$3 $4 $5 $6 $7 $8 $9 ${10}" = "--id US-BLOCKER --status retired --expected-status planned --require-runnable --json" ]
+  printf '%s\n' '{"protocol_version":1,"operation":"story.update","request_id":"fixture","result":{"id":"US-BLOCKER","before_status":"planned","after_status":"retired","runnable_before":true},"error":null}'
+else
+  exit 64
+fi
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        (
+            HarnessProtocol::new(executable, repo.clone(), repo.join("harness.db")),
+            count,
+        )
     }
 
     #[test]
-    fn classifies_planned_story_with_verify_as_ready() {
+    fn changed_classification_requires_human_attention() {
         let item = classify(
-            "US-1".to_owned(),
-            "planned".to_owned(),
+            "US-CHANGED".to_owned(),
+            "changed".to_owned(),
             "normal".to_owned(),
             Some("cargo test".to_owned()),
+            false,
         );
-
-        assert_eq!(item.verify, "configured");
-        assert_eq!(item.runnable, "yes");
-        assert_eq!(item.reason, "ready");
-    }
-
-    #[test]
-    fn missing_verify_is_warning_not_status_change() {
-        let item = classify(
-            "US-2".to_owned(),
-            "in_progress".to_owned(),
-            "normal".to_owned(),
-            None,
-        );
-
-        assert_eq!(item.status, "in_progress");
-        assert_eq!(item.verify, "missing");
         assert_eq!(item.runnable, "warn");
-        assert_eq!(item.reason, "proof command missing");
+        assert_eq!(item.reason, "changed story needs human review");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn implemented_and_retired_are_not_runnable() {
-        for status in ["implemented", "retired"] {
-            let item = classify(
-                "US-3".to_owned(),
-                status.to_owned(),
-                "normal".to_owned(),
-                Some("true".to_owned()),
-            );
-            assert_eq!(item.runnable, "no");
-        }
+    fn board_uses_one_work_graph_process_and_changed_wins_over_blockers() {
+        let temp = tempfile::tempdir().unwrap();
+        let (protocol, count) = fake_protocol(&temp);
+        let items = list_board(&protocol, &temp.path().join("state.db")).unwrap();
+        let changed = items.iter().find(|item| item.id == "US-CHANGED").unwrap();
+
+        assert_eq!(changed.board_state, BoardState::NeedsAttention);
+        assert_eq!(changed.reason, "changed story needs human review");
+        assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn list_work_reads_story_rows_from_database() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("harness.db");
-        let connection = Connection::open(&db_path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE story (
-                    id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    risk_lane TEXT NOT NULL,
-                    verify_command TEXT
-                );
-                INSERT INTO story (id, status, risk_lane, verify_command)
-                VALUES
-                    ('US-READY', 'planned', 'normal', 'cargo test'),
-                    ('US-WARN', 'planned', 'normal', NULL),
-                    ('US-DONE', 'implemented', 'normal', 'true');",
-            )
-            .unwrap();
-        drop(connection);
+    fn work_source_fetches_graph_once_not_once_per_story() {
+        let temp = tempfile::tempdir().unwrap();
+        let (protocol, count) = fake_protocol(&temp);
+        let candidates = HarnessDbWorkSource::new(&protocol).poll().unwrap();
 
-        let items = list_work(&db_path).unwrap();
-
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0].id, "US-DONE");
-        assert_eq!(items[0].runnable, "no");
-        assert_eq!(items[1].id, "US-READY");
-        assert_eq!(items[1].runnable, "yes");
-        assert_eq!(items[2].id, "US-WARN");
-        assert_eq!(items[2].runnable, "warn");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].story_id, "US-BLOCKER");
+        assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn harness_db_work_source_polls_only_ready_stories() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("harness.db");
-        let connection = Connection::open(&db_path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE story (
-                    id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    risk_lane TEXT NOT NULL,
-                    verify_command TEXT
-                );
-                INSERT INTO story (id, status, risk_lane, verify_command)
-                VALUES
-                    ('US-READY', 'planned', 'normal', 'cargo test'),
-                    ('US-WARN', 'planned', 'normal', NULL),
-                    ('US-DONE', 'implemented', 'normal', 'true');",
-            )
-            .unwrap();
-        drop(connection);
+    fn retirement_reads_expected_status_then_uses_cas_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (protocol, count) = fake_protocol(&temp);
+        retire_story(&protocol, "US-BLOCKER").unwrap();
 
-        let source = HarnessDbWorkSource::new(&db_path);
-        let candidates = source.poll().unwrap();
-
-        assert_eq!(
-            candidates,
-            vec![WorkCandidate {
-                story_id: "US-READY".to_owned(),
-                source: "harness-db".to_owned(),
-            }]
-        );
-        assert!(EXTERNAL_WORK_SOURCE_BOUNDARIES.contains(&"github-issues"));
-    }
-
-    #[test]
-    fn board_marks_story_ready_without_incomplete_blockers() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = create_harness_db(&temp_dir, false);
-        let state_db = temp_dir.path().join(".symphony/state.db");
-        insert_story(&db_path, "US-READY", "planned");
-
-        let items = list_board(&db_path, &state_db).unwrap();
-
-        assert_eq!(items[0].board_state, BoardState::Ready);
-        assert_eq!(items[0].reason, "ready");
-    }
-
-    #[test]
-    fn board_omits_retired_stories_from_active_work() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = create_harness_db(&temp_dir, false);
-        let state_db = temp_dir.path().join(".symphony/state.db");
-        insert_story(&db_path, "US-READY", "planned");
-        insert_story(&db_path, "US-RETIRED", "retired");
-
-        let items = list_board(&db_path, &state_db).unwrap();
-
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].id, "US-READY");
-    }
-
-    #[test]
-    fn board_marks_story_blocked_by_incomplete_dependency() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = create_harness_db(&temp_dir, true);
-        let state_db = temp_dir.path().join(".symphony/state.db");
-        insert_story(&db_path, "US-A", "planned");
-        insert_story(&db_path, "US-B", "planned");
-        insert_dependency(&db_path, "US-A", "US-B");
-
-        let items = list_board(&db_path, &state_db).unwrap();
-        let blocked = items.iter().find(|item| item.id == "US-B").unwrap();
-
-        assert_eq!(blocked.board_state, BoardState::Blocked);
-        assert_eq!(blocked.blockers, vec!["US-A"]);
-        assert_eq!(blocked.reason, "waiting for US-A");
-    }
-
-    #[test]
-    fn board_detects_dependency_cycles_as_breakdown_problems() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = create_harness_db(&temp_dir, true);
-        let state_db = temp_dir.path().join(".symphony/state.db");
-        insert_story(&db_path, "US-A", "planned");
-        insert_story(&db_path, "US-B", "planned");
-        insert_dependency(&db_path, "US-A", "US-B");
-        insert_dependency(&db_path, "US-B", "US-A");
-
-        let items = list_board(&db_path, &state_db).unwrap();
-
-        assert!(items
-            .iter()
-            .all(|item| item.board_state == BoardState::Blocked));
-        assert!(items
-            .iter()
-            .all(|item| item.reason.contains("dependency cycle")));
-    }
-
-    #[test]
-    fn board_exposes_parent_child_hierarchy() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = create_harness_db(&temp_dir, false);
-        let state_db = temp_dir.path().join(".symphony/state.db");
-        insert_story(&db_path, "US-PARENT", "planned");
-        insert_story(&db_path, "US-CHILD", "planned");
-        insert_story(&db_path, "US-GRANDCHILD", "planned");
-        insert_hierarchy(&db_path, "US-PARENT", "US-CHILD");
-        insert_hierarchy(&db_path, "US-CHILD", "US-GRANDCHILD");
-
-        let items = list_board(&db_path, &state_db).unwrap();
-        let parent = items.iter().find(|item| item.id == "US-PARENT").unwrap();
-        let child = items.iter().find(|item| item.id == "US-CHILD").unwrap();
-        let grandchild = items
-            .iter()
-            .find(|item| item.id == "US-GRANDCHILD")
-            .unwrap();
-
-        assert_eq!(parent.children, vec!["US-CHILD"]);
-        assert_eq!(parent.hierarchy_depth, 0);
-        assert_eq!(child.parent_id, Some("US-PARENT".to_owned()));
-        assert_eq!(child.children, vec!["US-GRANDCHILD"]);
-        assert_eq!(child.hierarchy_depth, 1);
-        assert_eq!(grandchild.parent_id, Some("US-CHILD".to_owned()));
-        assert_eq!(grandchild.hierarchy_depth, 2);
-    }
-
-    #[test]
-    fn board_overlays_active_review_attention_and_done_run_states() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = create_harness_db(&temp_dir, false);
-        let state_db = temp_dir.path().join(".symphony/state.db");
-        insert_story(&db_path, "US-RUNNING", "planned");
-        insert_story(&db_path, "US-REVIEW", "planned");
-        insert_story(&db_path, "US-FAILED", "planned");
-        insert_story(&db_path, "US-SYNCED", "planned");
-        insert_story(&db_path, "US-DONE", "implemented");
-
-        add_run(
-            state_db.clone(),
-            "US-REVIEW",
-            "run_2",
-            "completed",
-            "not_applied",
-            Some("https://example.test/pr/2"),
-        );
-        add_run(
-            state_db.clone(),
-            "US-FAILED",
-            "run_3",
-            "failed",
-            "not_applied",
-            None,
-        );
-        add_run(
-            state_db.clone(),
-            "US-SYNCED",
-            "run_4",
-            "completed",
-            "applied",
-            Some("https://example.test/pr/4"),
-        );
-        add_run(
-            state_db.clone(),
-            "US-RUNNING",
-            "run_1",
-            "running",
-            "not_applied",
-            None,
-        );
-
-        let items = list_board(&db_path, &state_db).unwrap();
-        let state_for = |id: &str| {
-            items
-                .iter()
-                .find(|item| item.id == id)
-                .unwrap()
-                .board_state
-                .clone()
-        };
-
-        assert_eq!(state_for("US-RUNNING"), BoardState::InProgress);
-        assert_eq!(state_for("US-REVIEW"), BoardState::Review);
-        assert_eq!(state_for("US-FAILED"), BoardState::NeedsAttention);
-        assert_eq!(state_for("US-SYNCED"), BoardState::Done);
-        assert_eq!(state_for("US-DONE"), BoardState::Done);
+        assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 2);
     }
 }

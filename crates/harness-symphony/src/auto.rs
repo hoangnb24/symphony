@@ -4,6 +4,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::config::ResolvedConfig;
+use crate::harness_protocol::HarnessProtocol;
 use crate::run::{execute_run, RunError};
 use crate::state::{RunStateStore, StateError};
 use crate::work::{HarnessDbWorkSource, WorkError, WorkSource, EXTERNAL_WORK_SOURCE_BOUNDARIES};
@@ -101,7 +102,10 @@ fn run_auto_mode_with_runner(
     validate_source(&options.source)?;
 
     let store = RunStateStore::new(config.state_db.clone());
-    let source = HarnessDbWorkSource::new(&config.harness_db);
+    store.ensure_migration_fence_released()?;
+    let protocol = HarnessProtocol::from_config(config).map_err(WorkError::from)?;
+    protocol.preflight().map_err(WorkError::from)?;
+    let source = HarnessDbWorkSource::new(&protocol);
     let mut summary = AutoRunSummary {
         source: source.name().to_owned(),
         enqueued: 0,
@@ -112,6 +116,7 @@ fn run_auto_mode_with_runner(
     };
 
     loop {
+        store.ensure_migration_fence_released()?;
         for candidate in source.poll()? {
             let queued =
                 store.enqueue_work(&candidate.story_id, &candidate.source, options.max_attempts)?;
@@ -197,13 +202,27 @@ mod tests {
     use super::*;
     use crate::config::ResolvedConfig;
     use rusqlite::{params, Connection};
+    use std::fs;
     use std::path::Path;
 
     fn config_for_root(root: &Path) -> ResolvedConfig {
+        let cli = root.join("fake-harness-cli");
+        fs::write(&cli, r#"#!/bin/sh
+if [ "$1 $2 $3" = "query contract --json" ]; then
+  printf '%s\n' '{"protocol_version":1,"operation":"query.contract","request_id":null,"result":{"protocol_version":1,"cli_version":"0.1.14","schema_minimum":1,"schema_maximum":13,"database_state":"current","database_schema_version":13,"required_environment_variables":["HARNESS_DB_PATH"],"capabilities":["stories.read.v1","stories.write.v1","work-graph.read.v1","story-dependencies.read-write.v1","story-hierarchy.read-write.v1","changesets.apply.v1","changesets.status-sha.v1","isolated-db.v1","isolated-db-snapshot.v1","semantic-operation-log.v1"]},"error":null}'
+elif [ "$1 $2 $3" = "query work-graph --json" ]; then
+  stories=$(sqlite3 -json "$HARNESS_DB_PATH" "SELECT id,title,risk_lane,NULL AS contract_doc,status,verify_command,(status='planned' AND verify_command IS NOT NULL) AS runnable FROM story ORDER BY id" | sed 's/\"runnable\":1/\"runnable\":true/g;s/\"runnable\":0/\"runnable\":false/g')
+  printf '%s\n' "{\"protocol_version\":1,\"operation\":\"query.work-graph\",\"request_id\":null,\"result\":{\"stories\":$stories,\"dependencies\":[],\"hierarchy\":[],\"revision\":\"fixture\"},\"error\":null}"
+else
+  exit 64
+fi
+"#).unwrap();
+        make_executable(&cli);
         ResolvedConfig {
             version: 1,
             repo_root: root.to_path_buf(),
             harness_db: root.join("harness.db"),
+            harness_cli: Some(cli),
             state_db: root.join(".symphony/state.db"),
             runs_dir: root.join(".harness/runs"),
             worktrees_dir: root.join(".symphony/worktrees"),
@@ -225,6 +244,15 @@ mod tests {
             auto_max_attempts: 2,
         }
     }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
 
     fn write_story_db(path: &Path, id: &str) {
         let connection = Connection::open(path).unwrap();
@@ -294,6 +322,7 @@ mod tests {
         assert!(matches!(error, AutoError::AdapterBoundary(source) if source == "github-issues"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn harness_db_source_feeds_one_queued_run() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -322,6 +351,39 @@ mod tests {
         assert_eq!(queue.attempts, 1);
     }
 
+    #[test]
+    fn auto_mode_refuses_to_poll_or_enqueue_while_migration_fence_is_held() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        write_story_db(&config.harness_db, "US-FENCED");
+        let store = RunStateStore::new(config.state_db.clone());
+        store.hold_migration_fence("ownership handoff").unwrap();
+        let mut runner = FakeRunner::default();
+        let options = AutoRunOptions {
+            enabled: true,
+            source: "harness-db".to_owned(),
+            once: true,
+            max_runs: Some(1),
+            max_attempts: 1,
+            poll_interval_seconds: 0,
+            max_idle_cycles: Some(1),
+        };
+
+        let error = run_auto_mode_with_runner(&config, options, &mut runner).unwrap_err();
+
+        assert!(matches!(
+            error,
+            AutoError::State(StateError::MigrationFenceHeld(reason))
+                if reason == "ownership handoff"
+        ));
+        assert_eq!(runner.calls, 0);
+        assert!(matches!(
+            store.queue_record("US-FENCED"),
+            Err(StateError::RunNotFound(_))
+        ));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn failed_run_is_retried_until_success() {
         let temp_dir = tempfile::tempdir().unwrap();

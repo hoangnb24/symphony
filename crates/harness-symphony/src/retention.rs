@@ -74,6 +74,7 @@ mod tests {
             version: 1,
             repo_root: root.to_path_buf(),
             harness_db: root.join("harness.db"),
+            harness_cli: None,
             state_db: root.join(".symphony/state.db"),
             runs_dir: root.join(".harness/runs"),
             worktrees_dir: root.join(".symphony/worktrees"),

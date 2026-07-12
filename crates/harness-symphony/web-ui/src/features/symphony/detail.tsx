@@ -546,13 +546,13 @@ function ReviewPanel({
 
 function FailureSummaryPanel({ summary, compact = false }: { summary: FailureSummary; compact?: boolean }) {
   return (
-    <div className={cn("rounded-md border border-destructive/30 bg-destructive/10 p-3", compact ? "mt-3" : "")}>
+    <div className={cn("min-w-0 max-w-full overflow-hidden rounded-md border border-destructive/30 bg-destructive/10 p-3", compact ? "mt-3" : "")}>
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 max-w-full flex-1 items-center gap-2">
           <AlertTriangle className="size-4 shrink-0 text-destructive" />
           <strong className="bounded-text block min-w-0 max-w-full text-sm font-bold">{summary.category}</strong>
         </div>
-        <Badge tone="danger" className="max-w-full break-all">
+        <Badge tone="danger" className="min-w-0 max-w-full whitespace-normal break-all">
           {summary.run_id}
         </Badge>
       </div>
@@ -583,10 +583,10 @@ function TextBlock({ title, text }: { title: string; text: string }) {
 function ReviewStatusPanel({ state }: { state: Extract<ReviewState, { status: "loading" | "error" }> }) {
   if (state.status === "loading") {
     return (
-      <div className="border-b border-border p-4" role="status" aria-live="polite">
-        <div className="flex items-center gap-2 rounded-md border border-border bg-muted p-3 text-sm text-muted-foreground">
-          <Loader2 className="size-4 motion-safe:animate-spin" />
-          Loading review evidence for {state.runId}.
+      <div className="min-w-0 max-w-full border-b border-border p-4" role="status" aria-live="polite">
+        <div className="flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-md border border-border bg-muted p-3 text-sm text-muted-foreground">
+          <Loader2 className="size-4 shrink-0 motion-safe:animate-spin" />
+          <span className="bounded-text min-w-0 max-w-full">Loading review evidence for {state.runId}.</span>
         </div>
       </div>
     );
@@ -624,8 +624,8 @@ function EventLog({ events, live = false }: { events: RunEvent[]; live?: boolean
   const entries = formatRunLog(events).slice(-12);
 
   return (
-    <div id="logs" className="flex flex-col gap-3 p-4" role={live ? "status" : undefined} aria-live={live ? "polite" : undefined}>
-      <div className="flex items-baseline justify-between gap-3">
+    <div id="logs" className="flex min-w-0 max-w-full flex-col gap-3 p-4" role={live ? "status" : undefined} aria-live={live ? "polite" : undefined}>
+      <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-3">
         <SectionTitle>Run communication</SectionTitle>
         <p className="text-xs text-muted-foreground">Raw artifact: APP_SERVER_EVENTS.jsonl</p>
       </div>
@@ -639,16 +639,16 @@ function EventLog({ events, live = false }: { events: RunEvent[]; live?: boolean
                 entry.kind === "message" ? "bg-background" : "bg-muted"
               )}
             >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
                   <Badge tone={entry.kind === "message" ? "accent" : entry.kind === "progress" ? "info" : "neutral"}>
                     {entry.source}
                   </Badge>
-                  <strong className="font-semibold">{entry.title}</strong>
+                  <strong className="bounded-text min-w-0 max-w-full font-semibold">{entry.title}</strong>
                 </div>
                 {entry.timestamp ? <span className="text-xs text-muted-foreground">{entry.timestamp}</span> : null}
               </div>
-              <p className="break-words text-sm leading-6 text-muted-foreground">{entry.message}</p>
+              <p className="bounded-text min-w-0 max-w-full text-sm leading-6 text-muted-foreground">{entry.message}</p>
             </div>
           ))
         ) : (
@@ -678,7 +678,7 @@ function ListBlock({
   empty: string;
 }) {
   return (
-    <div>
+    <div className="min-w-0 max-w-full">
       <p className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{title}</p>
       <div className="mt-2 grid min-h-8 gap-2 sm:flex sm:flex-wrap">
         {values.length > 0 ? (

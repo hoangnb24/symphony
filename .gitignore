@@ -1,0 +1,29 @@
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
+# Rust build output
+/target/
+
+# Node dependencies and generated Web UI output
+node_modules/
+dist/
+desktop-dist/
+desktop-resources/
+test-results/
+playwright-report/
+blob-report/
+*.tsbuildinfo
+
+# Repository-local Symphony and Harness runtime state
+/.symphony/
+/harness.db
+/harness.db-wal
+/harness.db-shm
+
+# Harness durable layer
+harness.db
+harness.db-wal
+harness.db-shm
+scripts/bin/harness-cli
+scripts/bin/harness-cli.exe

@@ -1,0 +1,133 @@
+name: Standalone Symphony
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-quality:
+    name: Rust formatting and Clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run Clippy for every target
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  standalone-platform:
+    name: Standalone paths (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/harness-symphony/web-ui/package-lock.json
+      - name: Verify Cargo metadata
+        shell: bash
+        run: |
+          cargo metadata --locked --no-deps --format-version 1 > cargo-metadata.json
+          node -e 'const m=require("./cargo-metadata.json"); if(m.workspace_members.length!==1 || m.packages.length!==1 || m.packages[0].name!=="harness-symphony") process.exit(1)'
+      - name: Run Rust tests
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --locked -- --test-threads=1
+      - name: Compile Windows tests and run native-safe coverage
+        if: runner.os == 'Windows'
+        run: |
+          cargo test --workspace --locked --no-run
+          cargo test -p harness-symphony --locked harness_protocol::tests -- --test-threads=1
+          cargo test -p harness-symphony --locked agent::tests -- --test-threads=1
+          cargo test -p harness-symphony --locked config::tests -- --test-threads=1
+          cargo test -p harness-symphony --locked interface::tests -- --test-threads=1
+      - name: Exercise native protocol discovery and execution preflight
+        if: runner.os != 'Windows'
+        run: |
+          cargo test -p harness-symphony --locked harness_protocol::tests -- --nocapture
+          cargo test -p harness-symphony --locked agent::tests -- --nocapture
+          cargo test -p harness-symphony --locked doctor::tests -- --nocapture
+      - name: Run fail-before-mutation compatibility fixtures
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq ripgrep sqlite3
+          cli_fixture="$RUNNER_TEMP/symphony-compatibility-cli"
+          tests/compatibility/bootstrap-harness-fixture.sh \
+            --upgrade-cli --story US-CI-COMPAT "$cli_fixture"
+          cli="$cli_fixture/scripts/bin/harness-cli"
+          HARNESS_CLI_PATH="$cli" tests/compatibility/test-harness-protocol.sh
+          HARNESS_CLI_PATH="$cli" tests/compatibility/test-agent-preflight.sh
+      - name: Install Web UI dependencies
+        run: npm --prefix crates/harness-symphony/web-ui ci
+      - name: Build Web UI
+        run: npm --prefix crates/harness-symphony/web-ui run build
+      - name: Bootstrap native external fixture and run desktop path smoke
+        shell: bash
+        run: |
+          fixture="$RUNNER_TEMP/symphony-desktop-fixture"
+          tests/compatibility/bootstrap-harness-fixture.sh \
+            --upgrade-cli --story US-INDEP-001 "$fixture"
+          fixture_arg="$fixture"
+          if command -v cygpath >/dev/null 2>&1; then
+            fixture_arg=$(cygpath -w "$fixture")
+          fi
+          npm --prefix crates/harness-symphony/web-ui run desktop:smoke -- \
+            --repo-root "$fixture_arg"
+
+  browser-e2e:
+    name: Playwright end-to-end
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/harness-symphony/web-ui/package-lock.json
+      - name: Install Web UI dependencies
+        run: npm --prefix crates/harness-symphony/web-ui ci
+      - name: Install Chromium and system dependencies
+        run: npm --prefix crates/harness-symphony/web-ui exec -- playwright install --with-deps chromium
+      - name: Bootstrap external Playwright fixture
+        shell: bash
+        run: |
+          fixture="$RUNNER_TEMP/symphony-playwright-fixture"
+          tests/compatibility/bootstrap-harness-fixture.sh \
+            --upgrade-cli --story US-PLAYWRIGHT "$fixture"
+          npm --prefix crates/harness-symphony/web-ui run build
+          echo "PLAYWRIGHT_REPO_ROOT=$fixture" >> "$GITHUB_ENV"
+          echo "HARNESS_SYMPHONY_WEB_DIST_DIR=$GITHUB_WORKSPACE/crates/harness-symphony/web-ui/dist" >> "$GITHUB_ENV"
+      - name: Run Playwright tests
+        run: npm --prefix crates/harness-symphony/web-ui run e2e
+
+  release-build:
+    name: Locked release build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Build release binary
+        run: cargo build --workspace --release --locked

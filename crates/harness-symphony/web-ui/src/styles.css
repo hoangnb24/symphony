@@ -47,8 +47,10 @@ body {
 }
 
 .bounded-text {
+  min-width: 0;
+  max-width: 100%;
   overflow-wrap: anywhere;
-  word-break: normal;
+  word-break: break-word;
 }
 
 .task-close-confetti-host {

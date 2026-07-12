@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "story": "US-093",
+  "captured_at": "2026-07-12T03:58:00Z",
+  "protocol_tag": "harness-cli-v0.1.14",
+  "protocol_commit": "d2f89eeabe8d01df95fd19cd6ba981b01a71730f",
+  "cli_sha256": "0adcd5360cd636c189fe0cd958e5b73261f7012a4e43631f08c61269c785caf9",
+  "source": {
+    "repository": "git@github.com:hoangnb24/repository-harness.git",
+    "commit": "5da50100b81449a430d5a701ecf1a114186cd5af",
+    "graph_revision": "6f64aba6535c3842e910d513262d86ace707d4199934d7fe7b9f83e0711437d3",
+    "dependency_set_sha256": "94a62565d9e3617db560603de51ea21fb8e46fb78b7a4c465b123526d54abdeb",
+    "story_ids": ["US-093", "US-094", "US-095", "US-096"],
+    "status": "changed",
+    "runnable_count": 0,
+    "verifier_pattern": "scripts/verify-e11-external-gate.sh <story-id>",
+    "board_state": "Needs Attention",
+    "edges_preserved": true
+  },
+  "target": {
+    "repository": "git@github.com:hoangnb24/symphony.git",
+    "commit": "4a384543e43a2b9cb46f4baf5ed89bf1972a898f",
+    "graph_revision": "60e6dae4340668fc48654ef883edf2e79e3b22a525075f37e1d5fb7cf363c5f4",
+    "dependency_set_sha256": "235dc0711dcef716ba2a822f630b34b54dc1d8f5397d67095f5ce421e523a7e2",
+    "stories": [
+      {"id":"US-093","status":"planned","verify_command":"scripts/verify-e11-us093.sh","runnable":true},
+      {"id":"US-094","status":"planned","verify_command":null,"runnable":false},
+      {"id":"US-095","status":"planned","verify_command":null,"runnable":false},
+      {"id":"US-096","status":"planned","verify_command":null,"runnable":false}
+    ],
+    "dependencies": [
+      {"blocker":"US-093","blocked":"US-094"},
+      {"blocker":"US-094","blocked":"US-095"},
+      {"blocker":"US-095","blocked":"US-096"}
+    ],
+    "generic_runnable_count": 1,
+    "product_fence_state_at_capture": "held",
+    "product_runnable_count_at_capture": 0
+  },
+  "rollback": {
+    "vault": "/Users/themrb/Documents/personal/e11-migration-artifacts/US-093-20260712",
+    "paired_backup_manifest_sha256": "84bfd6e94af7c4f7a41e88af583dce6bb6e0d33a793412bf895d33f3f2922066",
+    "target_verifier_activation_changeset_sha256": "cb52031b7db6d67c2ceb51d5a2fcd4d25cb113503919c7c72f2b9f161a6dadb0"
+  },
+  "assertions": {
+    "source_direct_run_rejected": true,
+    "source_receipt_gate_failed_before_receipt": true,
+    "target_direct_run_rejected_while_fenced": true,
+    "target_auto_rejected_while_fenced": true,
+    "target_verifier_negative_fixture_failed": true,
+    "target_verifier_passed": true,
+    "temporary_target_changesets_tracked": false
+  }
+}

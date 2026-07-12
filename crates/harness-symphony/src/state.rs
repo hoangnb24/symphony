@@ -12,6 +12,14 @@ pub enum StateError {
     ActiveRunExists(String),
     #[error("run not found: {0}")]
     RunNotFound(String),
+    #[error("Symphony migration fence is held: {0}. Release the fence only after runnable ownership is verified.")]
+    MigrationFenceHeld(String),
+    #[error("changeset {id} content SHA conflicts with the recorded identity: recorded {recorded}, received {received}")]
+    ChangesetContentConflict {
+        id: String,
+        recorded: String,
+        received: String,
+    },
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("io error: {0}")]
@@ -44,6 +52,11 @@ pub struct QueueRecord {
     pub last_error: Option<String>,
 }
 
+pub struct MigrationFenceGuard {
+    connection: Connection,
+    finished: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct NewRunRecord {
@@ -72,6 +85,7 @@ impl RunStateStore {
             fs::create_dir_all(parent)?;
         }
         let connection = Connection::open(&self.path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(300))?;
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS run_state (
                 run_id TEXT PRIMARY KEY,
@@ -91,6 +105,7 @@ impl RunStateStore {
             CREATE TABLE IF NOT EXISTS changeset_sync (
                 id TEXT PRIMARY KEY,
                 path TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL DEFAULT '',
                 applied INTEGER NOT NULL,
                 synced_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -104,6 +119,12 @@ impl RunStateStore {
                 last_error TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS migration_fence (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                held INTEGER NOT NULL CHECK (held IN (0, 1)),
+                reason TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );",
         )?;
         ensure_column(
@@ -114,11 +135,97 @@ impl RunStateStore {
         )?;
         ensure_column(
             &connection,
+            "changeset_sync",
+            "content_sha256",
+            "ALTER TABLE changeset_sync ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT '';",
+        )?;
+        ensure_column(
+            &connection,
             "run_state",
             "pr_status",
             "ALTER TABLE run_state ADD COLUMN pr_status TEXT NOT NULL DEFAULT 'missing';",
         )?;
         Ok(())
+    }
+
+    pub fn hold_migration_fence(&self, reason: &str) -> Result<(), StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(300))?;
+        connection.execute(
+            "INSERT INTO migration_fence (singleton, held, reason, updated_at)
+             VALUES (1, 1, ?1, datetime('now'))
+             ON CONFLICT(singleton) DO UPDATE SET
+                held=1,
+                reason=excluded.reason,
+                updated_at=datetime('now');",
+            params![reason],
+        )?;
+        Ok(())
+    }
+
+    pub fn release_migration_fence(&self) -> Result<(), StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(300))?;
+        connection.execute(
+            "UPDATE migration_fence
+             SET held=0, updated_at=datetime('now')
+             WHERE singleton=1;",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn ensure_migration_fence_released(&self) -> Result<(), StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        let reason = connection
+            .query_row(
+                "SELECT reason FROM migration_fence WHERE singleton=1 AND held=1;",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match reason {
+            Some(reason) => Err(StateError::MigrationFenceHeld(reason)),
+            None => Ok(()),
+        }
+    }
+
+    pub fn acquire_migration_fence_guard(&self) -> Result<MigrationFenceGuard, StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(300))?;
+        connection.execute_batch("BEGIN IMMEDIATE;")?;
+        let reason = connection
+            .query_row(
+                "SELECT reason FROM migration_fence WHERE singleton=1 AND held=1;",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(reason) = reason {
+            connection.execute_batch("ROLLBACK;")?;
+            return Err(StateError::MigrationFenceHeld(reason));
+        }
+        Ok(MigrationFenceGuard {
+            connection,
+            finished: false,
+        })
+    }
+
+    pub fn migration_fence_reason(&self) -> Result<Option<String>, StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection
+            .query_row(
+                "SELECT reason FROM migration_fence WHERE singleton=1 AND held=1;",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StateError::from)
     }
 
     #[allow(dead_code)]
@@ -271,6 +378,7 @@ impl RunStateStore {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn update_sync_status(
         &self,
         run_id: &str,
@@ -291,33 +399,55 @@ impl RunStateStore {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn record_changeset_synced(
         &self,
         id: &str,
         path: &std::path::Path,
+        content_sha256: &str,
         applied: bool,
     ) -> Result<(), StateError> {
         self.init()?;
         let connection = Connection::open(&self.path)?;
         connection.execute(
-            "INSERT INTO changeset_sync (id, path, applied, synced_at)
-             VALUES (?1, ?2, ?3, datetime('now'))
+            "INSERT INTO changeset_sync (id, path, content_sha256, applied, synced_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))
              ON CONFLICT(id) DO UPDATE SET
                 path=excluded.path,
+                content_sha256=excluded.content_sha256,
                 applied=excluded.applied,
-                synced_at=datetime('now');",
-            params![id, path.display().to_string(), i64::from(applied)],
+                synced_at=datetime('now')
+             WHERE changeset_sync.content_sha256='' OR changeset_sync.content_sha256=excluded.content_sha256;",
+            params![
+                id,
+                path.display().to_string(),
+                content_sha256,
+                i64::from(applied)
+            ],
         )?;
+        if connection.changes() == 0 {
+            let recorded = connection.query_row(
+                "SELECT content_sha256 FROM changeset_sync WHERE id=?1;",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )?;
+            return Err(StateError::ChangesetContentConflict {
+                id: id.to_owned(),
+                recorded,
+                received: content_sha256.to_owned(),
+            });
+        }
         Ok(())
     }
 
-    pub fn changeset_synced(&self, id: &str) -> Result<bool, StateError> {
+    pub fn changeset_synced(&self, id: &str, content_sha256: &str) -> Result<bool, StateError> {
         self.init()?;
         let connection = Connection::open(&self.path)?;
         connection
             .query_row(
-                "SELECT 1 FROM changeset_sync WHERE id=?1;",
-                params![id],
+                "SELECT 1 FROM changeset_sync
+                 WHERE id=?1 AND content_sha256=?2 AND applied=1;",
+                params![id, content_sha256],
                 |_| Ok(()),
             )
             .optional()
@@ -424,6 +554,75 @@ impl RunStateStore {
             )
             .optional()?
             .ok_or_else(|| StateError::RunNotFound(story_id.to_owned()))
+    }
+}
+
+impl MigrationFenceGuard {
+    pub fn record_changeset_synced(
+        &self,
+        id: &str,
+        path: &std::path::Path,
+        content_sha256: &str,
+        applied: bool,
+    ) -> Result<(), StateError> {
+        self.connection.execute(
+            "INSERT INTO changeset_sync (id, path, content_sha256, applied, synced_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+             ON CONFLICT(id) DO UPDATE SET
+                path=excluded.path,
+                content_sha256=excluded.content_sha256,
+                applied=excluded.applied,
+                synced_at=datetime('now')
+             WHERE changeset_sync.content_sha256='' OR changeset_sync.content_sha256=excluded.content_sha256;",
+            params![
+                id,
+                path.display().to_string(),
+                content_sha256,
+                i64::from(applied)
+            ],
+        )?;
+        if self.connection.changes() == 0 {
+            let recorded = self.connection.query_row(
+                "SELECT content_sha256 FROM changeset_sync WHERE id=?1;",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )?;
+            return Err(StateError::ChangesetContentConflict {
+                id: id.to_owned(),
+                recorded,
+                received: content_sha256.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn update_sync_status_if_present(
+        &self,
+        run_id: &str,
+        sync_status: &str,
+        next_action: &str,
+    ) -> Result<(), StateError> {
+        self.connection.execute(
+            "UPDATE run_state
+             SET sync_status=?1, next_action=?2, updated_at=datetime('now')
+             WHERE run_id=?3;",
+            params![sync_status, next_action, run_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn commit(mut self) -> Result<(), StateError> {
+        self.connection.execute_batch("COMMIT;")?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for MigrationFenceGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.connection.execute_batch("ROLLBACK;");
+        }
     }
 }
 
@@ -558,15 +757,82 @@ mod tests {
     }
 
     #[test]
+    fn migration_fence_is_singleton_and_survives_store_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join(".symphony/state.db");
+        let store = RunStateStore::new(path.clone());
+
+        store
+            .hold_migration_fence("cross-repository ownership handoff")
+            .unwrap();
+        store
+            .hold_migration_fence("ownership verification pending")
+            .unwrap();
+
+        let restarted = RunStateStore::new(path.clone());
+        let error = restarted.ensure_migration_fence_released().unwrap_err();
+        assert!(matches!(
+            error,
+            StateError::MigrationFenceHeld(reason)
+                if reason == "ownership verification pending"
+        ));
+        let rows: i64 = Connection::open(path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM migration_fence;", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        restarted.release_migration_fence().unwrap();
+        RunStateStore::new(restarted.path.clone())
+            .ensure_migration_fence_released()
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_fence_waits_for_inflight_writer_guard_then_holds() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join(".symphony/state.db");
+        let store = RunStateStore::new(path.clone());
+        let guard = store.acquire_migration_fence_guard().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            let result = RunStateStore::new(path).hold_migration_fence("concurrent handoff");
+            sender.send(result).unwrap();
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        guard.commit().unwrap();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+
+        assert!(matches!(
+            store.ensure_migration_fence_released(),
+            Err(StateError::MigrationFenceHeld(reason)) if reason == "concurrent handoff"
+        ));
+    }
+
+    #[test]
     fn records_synced_changesets_idempotently() {
         let temp_dir = tempfile::tempdir().unwrap();
         let store = RunStateStore::new(temp_dir.path().join(".symphony/state.db"));
 
-        assert!(!store.changeset_synced("run_1").unwrap());
+        let sha = "1111111111111111111111111111111111111111111111111111111111111111";
+        assert!(!store.changeset_synced("run_1", sha).unwrap());
         store
             .record_changeset_synced(
                 "run_1",
                 std::path::Path::new(".harness/changesets/run_1.changeset.jsonl"),
+                sha,
                 true,
             )
             .unwrap();
@@ -574,11 +840,25 @@ mod tests {
             .record_changeset_synced(
                 "run_1",
                 std::path::Path::new(".harness/changesets/run_1.changeset.jsonl"),
+                sha,
                 false,
             )
             .unwrap();
 
-        assert!(store.changeset_synced("run_1").unwrap());
+        assert!(!store.changeset_synced("run_1", sha).unwrap());
+
+        let conflict = store
+            .record_changeset_synced(
+                "run_1",
+                std::path::Path::new(".harness/changesets/run_1.changeset.jsonl"),
+                "2222222222222222222222222222222222222222222222222222222222222222",
+                true,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            conflict,
+            StateError::ChangesetContentConflict { id, .. } if id == "run_1"
+        ));
     }
 
     #[test]

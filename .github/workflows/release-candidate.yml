@@ -1,0 +1,299 @@
+name: Symphony Release Candidate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/release-candidate.yml"
+      - "crates/harness-symphony/**"
+      - "scripts/build-release.sh"
+      - "scripts/release-metadata.mjs"
+      - "scripts/merge-release-manifests.sh"
+      - "scripts/verify-release-manifest.sh"
+      - "tests/compatibility/smoke-release-artifact.*"
+      - "tests/release/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: symphony-release-candidate-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native-package:
+    name: Native candidate (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            archive: harness-symphony-0.1.0-linux-x64.tar.gz
+          - label: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: harness-symphony-0.1.0-linux-arm64.tar.gz
+          - label: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            archive: harness-symphony-0.1.0-macos-arm64.tar.gz
+          - label: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: harness-symphony-0.1.0-macos-x64.tar.gz
+          - label: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            archive: harness-symphony-0.1.0-windows-x64.tar.gz
+    steps:
+      - name: Check out the immutable candidate source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reject publication-style tag refs
+        shell: bash
+        run: test "$GITHUB_REF_TYPE" != tag
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/harness-symphony/web-ui/package-lock.json
+      - name: Install Linux compatibility dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq ripgrep sqlite3
+      - name: Install macOS compatibility dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install ripgrep
+      - name: Install Windows compatibility dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install ripgrep --yes --no-progress
+      - name: Run native Rust gates
+        run: |
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked --no-run
+      - name: Run complete native Rust suite
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --locked -- --test-threads=1
+      - name: Run Windows-native safe Rust coverage
+        if: runner.os == 'Windows'
+        run: |
+          cargo test -p harness-symphony --locked harness_protocol::tests -- --test-threads=1
+          cargo test -p harness-symphony --locked agent::tests -- --test-threads=1
+          cargo test -p harness-symphony --locked config::tests -- --test-threads=1
+          cargo test -p harness-symphony --locked interface::tests -- --test-threads=1
+      - name: Build and test Web UI
+        shell: bash
+        run: |
+          npm --prefix crates/harness-symphony/web-ui ci
+          npm --prefix crates/harness-symphony/web-ui run build
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            npm --prefix crates/harness-symphony/web-ui exec -- playwright install --with-deps chromium
+          else
+            npm --prefix crates/harness-symphony/web-ui exec -- playwright install chromium
+          fi
+      - name: Bootstrap external Harness fixture
+        shell: bash
+        run: |
+          fixture="$RUNNER_TEMP/symphony-release-fixture"
+          tests/compatibility/bootstrap-harness-fixture.sh \
+            --upgrade-cli --story US-RELEASE-CANDIDATE "$fixture"
+          fixture_arg="$fixture"
+          if command -v cygpath >/dev/null 2>&1; then
+            fixture_arg=$(cygpath -w "$fixture")
+          fi
+          echo "SYMPHONY_RELEASE_FIXTURE=$fixture_arg" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_REPO_ROOT=$fixture_arg" >> "$GITHUB_ENV"
+          echo "HARNESS_SYMPHONY_WEB_DIST_DIR=$GITHUB_WORKSPACE/crates/harness-symphony/web-ui/dist" >> "$GITHUB_ENV"
+      - name: Run native Playwright gate
+        run: npm --prefix crates/harness-symphony/web-ui run e2e
+      - name: Run native desktop gate
+        shell: bash
+        run: npm --prefix crates/harness-symphony/web-ui run desktop:smoke -- --repo-root "$SYMPHONY_RELEASE_FIXTURE"
+      - name: Run complete standalone compatibility gate
+        if: matrix.label == 'linux-x64'
+        shell: bash
+        env:
+          E11_US095_SKIP_BASE_VALIDATION: 1
+        run: scripts/verify-e11-us095.sh
+      - name: Build native release archive
+        shell: bash
+        env:
+          SYMPHONY_RELEASE_LABEL: ${{ matrix.label }}
+          SYMPHONY_RELEASE_TARGET: ${{ matrix.target }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: scripts/build-release.sh
+      - name: Assert native version contract
+        shell: bash
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          test -f "dist/$ARCHIVE"
+          test -f "dist/$ARCHIVE.sha256"
+          test -f dist/release-manifest.json
+          jq -e --arg sha "$GITHUB_SHA" --arg archive "$ARCHIVE" '
+            .source_sha == $sha and
+            .manifest_version == 1 and
+            .product == "harness-symphony" and
+            .symphony_version == "0.1.0" and
+            .supported_harness.protocol_version == 1 and
+            .supported_harness.schema_minimum == 1 and
+            .supported_harness.schema_maximum == 13 and
+            .supported_harness.current_schema_minimum == 12 and
+            .supported_harness.current_schema_maximum == 13 and
+            (.artifacts | length) == 1 and
+            .artifacts[0].archive_name == $archive and
+            .artifacts[0].target_triple == "${{ matrix.target }}"
+          ' dist/release-manifest.json >/dev/null
+          if [[ "${{ matrix.label }}" == linux-x64 ]]; then
+            tests/release/test-release-negative-fixtures.sh dist/release-manifest.json
+          fi
+          mv dist/release-manifest.json "dist/${{ matrix.label }}.release-manifest.json"
+          scripts/verify-release-manifest.sh --native \
+            "dist/${{ matrix.label }}.release-manifest.json"
+      - name: Compare packaged Unix binary version to manifest
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          unpack="$RUNNER_TEMP/version-contract"
+          mkdir -p "$unpack"
+          tar -xzf "dist/${{ matrix.archive }}" -C "$unpack"
+          report=$("$unpack/bin/harness-symphony" version --json)
+          jq -e --argjson report "$report" '
+            $report.symphony_version == .symphony_version and
+            $report.harness_protocol_version == .supported_harness.protocol_version and
+            $report.harness_schema_minimum == .supported_harness.schema_minimum and
+            $report.harness_schema_maximum == .supported_harness.schema_maximum and
+            $report.current_harness_schema_minimum == .supported_harness.current_schema_minimum and
+            $report.current_harness_schema_maximum == .supported_harness.current_schema_maximum and
+            $report.supported_harness_cli_versions == ["0.1.14"]
+          ' "dist/${{ matrix.label }}.release-manifest.json" >/dev/null
+      - name: Compare packaged Windows binary version to manifest
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $unpack = Join-Path $env:RUNNER_TEMP 'version-contract'
+          New-Item -ItemType Directory -Force -Path $unpack | Out-Null
+          tar -xf "dist/${{ matrix.archive }}" -C $unpack
+          $report = (& (Join-Path $unpack 'bin/harness-symphony.exe') version --json | ConvertFrom-Json)
+          $manifest = (Get-Content "dist/${{ matrix.label }}.release-manifest.json" -Raw | ConvertFrom-Json)
+          $supported = $manifest.supported_harness
+          if ($report.symphony_version -ne $manifest.symphony_version -or
+              $report.harness_protocol_version -ne $supported.protocol_version -or
+              $report.harness_schema_minimum -ne $supported.schema_minimum -or
+              $report.harness_schema_maximum -ne $supported.schema_maximum -or
+              $report.current_harness_schema_minimum -ne $supported.current_schema_minimum -or
+              $report.current_harness_schema_maximum -ne $supported.current_schema_maximum -or
+              ($report.supported_harness_cli_versions -join ',') -ne '0.1.14') {
+            throw 'packaged Windows binary version tuple differs from native release manifest'
+          }
+      - name: Smoke unpacked Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tests/compatibility/smoke-release-artifact.sh "dist/${{ matrix.archive }}" "$SYMPHONY_RELEASE_FIXTURE"
+      - name: Smoke unpacked Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tests/compatibility/smoke-release-artifact.ps1 -Artifact "dist/${{ matrix.archive }}" -Fixture "$env:SYMPHONY_RELEASE_FIXTURE"
+      - name: Build packaged Electron resources
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm --prefix crates/harness-symphony/web-ui run desktop:build
+      - name: Smoke packaged Electron resources
+        shell: bash
+        run: npm --prefix crates/harness-symphony/web-ui run desktop:packaged-smoke -- --repo-root "$SYMPHONY_RELEASE_FIXTURE"
+      - name: Upload immutable CI candidate component
+        uses: actions/upload-artifact@v4
+        with:
+          name: symphony-rc-${{ github.sha }}-${{ matrix.label }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  aggregate:
+    name: Verify exact candidate set
+    needs: native-package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out verification scripts only
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install aggregate verification dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq ripgrep
+      - name: Download isolated platform components
+        uses: actions/download-artifact@v4
+        with:
+          pattern: symphony-rc-${{ github.sha }}-*
+          path: candidate-components
+          merge-multiple: false
+      - name: Fail closed on missing, duplicate, or extra components
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(linux-x64 linux-arm64 macos-arm64 macos-x64 windows-x64)
+          test "$(find candidate-components -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = 5
+          mkdir -p dist
+          for label in "${expected[@]}"; do
+            component="candidate-components/symphony-rc-${GITHUB_SHA}-${label}"
+            test -d "$component"
+            find "$component" -maxdepth 1 -type f -exec cp {} dist/ \;
+          done
+          expected_files=$(cat <<'EOF'
+          harness-symphony-0.1.0-linux-arm64.tar.gz
+          harness-symphony-0.1.0-linux-arm64.tar.gz.sha256
+          harness-symphony-0.1.0-linux-x64.tar.gz
+          harness-symphony-0.1.0-linux-x64.tar.gz.sha256
+          harness-symphony-0.1.0-macos-arm64.tar.gz
+          harness-symphony-0.1.0-macos-arm64.tar.gz.sha256
+          harness-symphony-0.1.0-macos-x64.tar.gz
+          harness-symphony-0.1.0-macos-x64.tar.gz.sha256
+          harness-symphony-0.1.0-windows-x64.tar.gz
+          harness-symphony-0.1.0-windows-x64.tar.gz.sha256
+          linux-arm64.release-manifest.json
+          linux-x64.release-manifest.json
+          macos-arm64.release-manifest.json
+          macos-x64.release-manifest.json
+          windows-x64.release-manifest.json
+          EOF
+          )
+          actual_files=$(find dist -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
+          test "$actual_files" = "$(printf '%s\n' "$expected_files" | sed 's/^ *//' | LC_ALL=C sort)"
+      - name: Recompute checksums and aggregate canonical manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          for checksum in dist/*.sha256; do
+            (cd dist && sha256sum --check "$(basename "$checksum")")
+          done
+          scripts/merge-release-manifests.sh dist/release-manifest.json \
+            dist/linux-x64.release-manifest.json \
+            dist/linux-arm64.release-manifest.json \
+            dist/macos-arm64.release-manifest.json \
+            dist/macos-x64.release-manifest.json \
+            dist/windows-x64.release-manifest.json
+          scripts/verify-release-manifest.sh --aggregate dist/release-manifest.json
+      - name: Upload complete release candidate without publishing
+        uses: actions/upload-artifact@v4
+        with:
+          name: symphony-rc-${{ github.sha }}-complete
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7

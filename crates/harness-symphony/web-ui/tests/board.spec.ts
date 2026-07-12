@@ -22,10 +22,27 @@ function boardItem(id: string, title: string, board_state: string) {
 }
 
 async function expectNoHorizontalOverflow(locator: Locator, label: string) {
-  const overflow = await locator.evaluate(
-    (element) => Math.ceil(element.scrollWidth) - Math.ceil(element.clientWidth)
-  );
-  expect(overflow, `${label} horizontal overflow`).toBeLessThanOrEqual(1);
+  const report = await locator.evaluate((element) => {
+    const overflow = Math.ceil(element.scrollWidth) - Math.ceil(element.clientWidth);
+    const container = element.getBoundingClientRect();
+    const offenders = Array.from(element.querySelectorAll("*"))
+      .map((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        return {
+          element: candidate.tagName.toLowerCase(),
+          className: candidate.getAttribute("class") ?? "",
+          clientWidth: Math.ceil(candidate.clientWidth),
+          scrollWidth: Math.ceil(candidate.scrollWidth),
+          left: Math.floor(rect.left - container.left),
+          right: Math.ceil(rect.right - container.right),
+          text: (candidate.textContent ?? "").trim().slice(0, 120)
+        };
+      })
+      .filter((candidate) => candidate.scrollWidth - candidate.clientWidth > 1 || candidate.left < -1 || candidate.right > 1)
+      .slice(0, 12);
+    return { overflow, offenders };
+  });
+  expect(report.overflow, `${label} horizontal overflow; offenders=${JSON.stringify(report.offenders)}`).toBeLessThanOrEqual(1);
 }
 
 async function expectPageNoHorizontalOverflow(page: Page) {
@@ -41,6 +58,18 @@ async function expectReadableTaskCard(locator: Locator, label: string) {
 }
 
 test("board renders task columns and detail controls", async ({ page }) => {
+  const item = {
+    ...boardItem("US-052", "Sync Approval And Done Transition", "Ready"),
+    blockers: ["US-051"],
+    unblocks: ["US-053"],
+    parent_id: "US-050"
+  };
+  await page.route("**/api/board", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ items: [item] })
+    });
+  });
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Symphony work board" })).toBeVisible();
@@ -54,8 +83,9 @@ test("board renders task columns and detail controls", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Done", exact: true })).toBeVisible();
 
   await page.getByRole("textbox", { name: "Find task" }).fill("US-052");
-  await expect(page.getByRole("button", { name: /US-052/ })).toBeVisible();
-  await page.getByRole("button", { name: /US-052/ }).click();
+  const taskCard = page.getByTestId("task-card").filter({ hasText: "US-052" });
+  await expect(taskCard).toBeVisible();
+  await taskCard.click();
 
   const detail = page.getByRole("dialog", { name: "Selected work detail" });
   await expect(page.getByTestId("task-detail-overlay")).toHaveCSS("position", "fixed");

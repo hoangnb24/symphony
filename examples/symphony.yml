@@ -1,0 +1,39 @@
+version: 1
+
+repo:
+  root: "."
+  harness_db: "harness.db"
+  harness_cli: "scripts/bin/harness-cli"
+
+symphony:
+  state_db: ".symphony/state.db"
+  runs_dir: ".harness/runs"
+  worktrees_dir: ".symphony/worktrees"
+  single_active_run: true
+
+agent:
+  adapter: "codex"
+  command: []
+  timeout_minutes: 30
+
+pull_request:
+  create: "ask"
+  provider: "github"
+  draft_for: ["blocked", "needs_intake", "partial"]
+
+changeset:
+  directory: ".harness/changesets"
+  render_in_summary: true
+
+runs:
+  allow_here_for_tiny: true
+  compact_keep_last: 50
+
+cleanup:
+  keep_failed_worktrees: true
+  cleanup_after_sync: false
+
+auto:
+  source: "harness-db"
+  poll_interval_seconds: 30
+  max_attempts: 3
