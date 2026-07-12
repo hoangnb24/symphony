@@ -310,6 +310,9 @@ fn handle_request(config: &ResolvedConfig, request: &str) -> Result<HttpResponse
 }
 
 fn retire_task_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpResponse, WebError> {
+    if let Some(response) = migration_fence_conflict(config)? {
+        return Ok(response);
+    }
     let item = match list_board(&config.harness_db, &config.state_db)?
         .into_iter()
         .find(|item| item.id == story_id)
@@ -343,6 +346,9 @@ fn retire_task_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpR
 }
 
 fn recover_run_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpResponse, WebError> {
+    if let Some(response) = migration_fence_conflict(config)? {
+        return Ok(response);
+    }
     let item = match list_board(&config.harness_db, &config.state_db)?
         .into_iter()
         .find(|item| item.id == story_id)
@@ -561,6 +567,9 @@ fn pr_retry_response(config: &ResolvedConfig, run_id: &str) -> Result<HttpRespon
 }
 
 fn start_run_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpResponse, WebError> {
+    if let Some(response) = migration_fence_conflict(config)? {
+        return Ok(response);
+    }
     if let Some(active) = RunStateStore::new(config.state_db.clone()).active_run()? {
         return json_response(
             409,
@@ -591,6 +600,20 @@ fn start_run_response(config: &ResolvedConfig, story_id: &str) -> Result<HttpRes
                 error: error.to_string(),
             },
         ),
+    }
+}
+
+fn migration_fence_conflict(config: &ResolvedConfig) -> Result<Option<HttpResponse>, WebError> {
+    match RunStateStore::new(config.state_db.clone()).ensure_migration_fence_released() {
+        Ok(()) => Ok(None),
+        Err(error @ StateError::MigrationFenceHeld(_)) => json_response(
+            409,
+            &ErrorResponse {
+                error: error.to_string(),
+            },
+        )
+        .map(Some),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1661,6 +1684,46 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 409 Conflict"));
         assert!(response.contains("only Ready stories can be retired"));
+    }
+
+    #[test]
+    fn changed_story_cannot_be_started_or_retired() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        seed_story_with_status(&config.harness_db, "US-CHANGED", "Proxy", "changed");
+
+        let start =
+            handle_request(&config, "POST /api/tasks/US-CHANGED/start HTTP/1.1\r\n\r\n").unwrap();
+        let retire = handle_request(
+            &config,
+            "POST /api/tasks/US-CHANGED/retire HTTP/1.1\r\n\r\n",
+        )
+        .unwrap();
+
+        assert!(start.starts_with("HTTP/1.1 400 Bad Request"));
+        assert!(start.contains("status is changed"));
+        assert!(retire.starts_with("HTTP/1.1 409 Conflict"));
+        assert!(retire.contains("only Ready stories can be retired"));
+    }
+
+    #[test]
+    fn web_start_and_retire_fail_closed_while_migration_fence_is_held() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = test_config(&temp_dir);
+        seed_runnable_story(&config.harness_db, "US-FENCED");
+        RunStateStore::new(config.state_db.clone())
+            .hold_migration_fence("ownership handoff")
+            .unwrap();
+
+        let start =
+            handle_request(&config, "POST /api/tasks/US-FENCED/start HTTP/1.1\r\n\r\n").unwrap();
+        let retire =
+            handle_request(&config, "POST /api/tasks/US-FENCED/retire HTTP/1.1\r\n\r\n").unwrap();
+
+        assert!(start.starts_with("HTTP/1.1 409 Conflict"));
+        assert!(start.contains("migration fence is held"));
+        assert!(retire.starts_with("HTTP/1.1 409 Conflict"));
+        assert!(retire.contains("migration fence is held"));
     }
 
     #[test]

@@ -12,6 +12,8 @@ pub enum StateError {
     ActiveRunExists(String),
     #[error("run not found: {0}")]
     RunNotFound(String),
+    #[error("Symphony migration fence is held: {0}. Release the fence only after runnable ownership is verified.")]
+    MigrationFenceHeld(String),
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("io error: {0}")]
@@ -104,6 +106,12 @@ impl RunStateStore {
                 last_error TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS migration_fence (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                held INTEGER NOT NULL CHECK (held IN (0, 1)),
+                reason TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );",
         )?;
         ensure_column(
@@ -119,6 +127,62 @@ impl RunStateStore {
             "ALTER TABLE run_state ADD COLUMN pr_status TEXT NOT NULL DEFAULT 'missing';",
         )?;
         Ok(())
+    }
+
+    pub fn hold_migration_fence(&self, reason: &str) -> Result<(), StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection.execute(
+            "INSERT INTO migration_fence (singleton, held, reason, updated_at)
+             VALUES (1, 1, ?1, datetime('now'))
+             ON CONFLICT(singleton) DO UPDATE SET
+                held=1,
+                reason=excluded.reason,
+                updated_at=datetime('now');",
+            params![reason],
+        )?;
+        Ok(())
+    }
+
+    pub fn release_migration_fence(&self) -> Result<(), StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection.execute(
+            "UPDATE migration_fence
+             SET held=0, updated_at=datetime('now')
+             WHERE singleton=1;",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn ensure_migration_fence_released(&self) -> Result<(), StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        let reason = connection
+            .query_row(
+                "SELECT reason FROM migration_fence WHERE singleton=1 AND held=1;",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match reason {
+            Some(reason) => Err(StateError::MigrationFenceHeld(reason)),
+            None => Ok(()),
+        }
+    }
+
+    pub fn migration_fence_reason(&self) -> Result<Option<String>, StateError> {
+        self.init()?;
+        let connection = Connection::open(&self.path)?;
+        connection
+            .query_row(
+                "SELECT reason FROM migration_fence WHERE singleton=1 AND held=1;",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StateError::from)
     }
 
     #[allow(dead_code)]
@@ -555,6 +619,40 @@ mod tests {
 
             assert!(store.active_run().unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn migration_fence_is_singleton_and_survives_store_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join(".symphony/state.db");
+        let store = RunStateStore::new(path.clone());
+
+        store
+            .hold_migration_fence("cross-repository ownership handoff")
+            .unwrap();
+        store
+            .hold_migration_fence("ownership verification pending")
+            .unwrap();
+
+        let restarted = RunStateStore::new(path.clone());
+        let error = restarted.ensure_migration_fence_released().unwrap_err();
+        assert!(matches!(
+            error,
+            StateError::MigrationFenceHeld(reason)
+                if reason == "ownership verification pending"
+        ));
+        let rows: i64 = Connection::open(path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM migration_fence;", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        restarted.release_migration_fence().unwrap();
+        RunStateStore::new(restarted.path.clone())
+            .ensure_migration_fence_released()
+            .unwrap();
     }
 
     #[test]

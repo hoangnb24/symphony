@@ -474,6 +474,11 @@ fn derive_board_item(story: StoryRow, derivation: BoardDerivation<'_>) -> BoardI
 
     let (board_state, reason) = if story.status == "implemented" {
         (BoardState::Done, "story implemented".to_owned())
+    } else if story.status == "changed" {
+        (
+            BoardState::NeedsAttention,
+            "changed story needs human review".to_owned(),
+        )
     } else if derivation.in_cycle {
         (
             BoardState::Blocked,
@@ -509,7 +514,7 @@ fn derive_board_item(story: StoryRow, derivation: BoardDerivation<'_>) -> BoardI
             BoardState::Blocked,
             format!("waiting for {}", incomplete_blockers.join(", ")),
         )
-    } else if matches!(story.status.as_str(), "planned" | "in_progress" | "changed") {
+    } else if matches!(story.status.as_str(), "planned" | "in_progress") {
         (BoardState::Ready, "ready".to_owned())
     } else if story.status == "retired" {
         (BoardState::Done, "retired".to_owned())
@@ -781,6 +786,30 @@ mod tests {
 
         assert_eq!(items[0].board_state, BoardState::Ready);
         assert_eq!(items[0].reason, "ready");
+    }
+
+    #[test]
+    fn changed_story_is_needs_attention_even_with_run_history_and_blockers() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = create_harness_db(&temp_dir, true);
+        let state_db = temp_dir.path().join(".symphony/state.db");
+        insert_story(&db_path, "US-BLOCKER", "planned");
+        insert_story(&db_path, "US-CHANGED", "changed");
+        insert_dependency(&db_path, "US-BLOCKER", "US-CHANGED");
+        add_run(
+            state_db.clone(),
+            "US-CHANGED",
+            "run_changed",
+            "completed",
+            "not_applied",
+            Some("https://example.invalid/pr/1"),
+        );
+
+        let items = list_board(&db_path, &state_db).unwrap();
+        let changed = items.iter().find(|item| item.id == "US-CHANGED").unwrap();
+
+        assert_eq!(changed.board_state, BoardState::NeedsAttention);
+        assert_eq!(changed.reason, "changed story needs human review");
     }
 
     #[test]

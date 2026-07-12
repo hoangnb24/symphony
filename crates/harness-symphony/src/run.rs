@@ -112,6 +112,7 @@ struct ValidationCommand {
 }
 
 pub fn prepare_run(config: &ResolvedConfig, story_id: &str) -> Result<PreparedRun, RunError> {
+    ensure_migration_fence_released(config)?;
     ensure_no_active_run(config)?;
     refresh_checkout_from_upstream(config)?;
     let story = load_runnable_story(&config.harness_db, story_id)?;
@@ -167,6 +168,7 @@ pub fn prepare_here_run(config: &ResolvedConfig, story_id: &str) -> Result<Prepa
     if !config.allow_here_for_tiny {
         return Err(RunError::HereRunDisabled);
     }
+    ensure_migration_fence_released(config)?;
     ensure_no_active_run(config)?;
     refresh_checkout_from_upstream(config)?;
     let story = load_runnable_story(&config.harness_db, story_id)?;
@@ -233,6 +235,7 @@ pub fn execute_prepared_run(
     config: &ResolvedConfig,
     prepared: PreparedRun,
 ) -> Result<CompletedRun, RunError> {
+    ensure_migration_fence_released(config)?;
     if let Err(error) = run_agent(config, &prepared) {
         RunStateStore::new(config.state_db.clone()).update_status(
             &prepared.run_id,
@@ -277,6 +280,11 @@ fn ensure_no_active_run(config: &ResolvedConfig) -> Result<(), RunError> {
     if let Some(active) = RunStateStore::new(config.state_db.clone()).active_run()? {
         return Err(StateError::ActiveRunExists(active.run_id).into());
     }
+    Ok(())
+}
+
+fn ensure_migration_fence_released(config: &ResolvedConfig) -> Result<(), RunError> {
+    RunStateStore::new(config.state_db.clone()).ensure_migration_fence_released()?;
     Ok(())
 }
 
@@ -944,6 +952,52 @@ mod tests {
         ));
         assert!(!config.worktrees_dir.exists());
         assert!(!config.runs_dir.exists());
+    }
+
+    #[test]
+    fn prepare_run_refuses_durable_migration_fence_before_creating_artifacts() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        write_story_db(&config.harness_db, "US-FENCED", "planned", "normal");
+        RunStateStore::new(config.state_db.clone())
+            .hold_migration_fence("ownership handoff")
+            .unwrap();
+
+        let error = prepare_run(&config, "US-FENCED").unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunError::State(StateError::MigrationFenceHeld(reason))
+                if reason == "ownership handoff"
+        ));
+        assert!(!config.worktrees_dir.exists());
+        assert!(!config.runs_dir.exists());
+    }
+
+    #[test]
+    fn prepared_run_cannot_launch_agent_after_fence_is_acquired() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        let prepared = PreparedRun {
+            run_id: "run_fenced".to_owned(),
+            story_id: "US-FENCED".to_owned(),
+            branch: Some("symphony/run_fenced".to_owned()),
+            worktree: temp_dir.path().join("worktree"),
+            contract_path: temp_dir.path().join("RUN_CONTRACT.json"),
+            harness_db_path: temp_dir.path().join("worktree/harness.db"),
+            lightweight: false,
+        };
+        RunStateStore::new(config.state_db.clone())
+            .hold_migration_fence("acquired after preparation")
+            .unwrap();
+
+        let error = execute_prepared_run(&config, prepared).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunError::State(StateError::MigrationFenceHeld(reason))
+                if reason == "acquired after preparation"
+        ));
     }
 
     #[test]

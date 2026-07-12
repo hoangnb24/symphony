@@ -51,6 +51,8 @@ enum Command {
     Pr(PrArgs),
     /// Inspect resolved Symphony configuration.
     Config(ConfigArgs),
+    /// Hold, inspect, or release the crash-durable ownership migration fence.
+    MigrationFence(MigrationFenceArgs),
 }
 
 #[derive(Args, Debug)]
@@ -170,6 +172,26 @@ enum ConfigAction {
     Show,
 }
 
+#[derive(Args, Debug)]
+struct MigrationFenceArgs {
+    #[command(subcommand)]
+    action: MigrationFenceAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum MigrationFenceAction {
+    /// Prevent selectors, runs, agents, and Web mutations during ownership handoff.
+    Hold {
+        /// Human-readable reason retained across process restarts.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Show whether the ownership handoff fence is held.
+    Status,
+    /// Release the fence after exact runnable-owner verification passes.
+    Release,
+}
+
 #[derive(Debug, Error)]
 pub enum InterfaceError {
     #[error("{0}")]
@@ -208,6 +230,23 @@ pub fn run(cli: Cli) -> Result<(), InterfaceError> {
         Command::Config(args) => match args.action {
             ConfigAction::Show => print_config(&resolved),
         },
+        Command::MigrationFence(args) => {
+            let store = RunStateStore::new(resolved.state_db.clone());
+            match args.action {
+                MigrationFenceAction::Hold { reason } => {
+                    store.hold_migration_fence(&reason)?;
+                    println!("Migration fence held: {reason}");
+                }
+                MigrationFenceAction::Status => match store.migration_fence_reason()? {
+                    Some(reason) => println!("Migration fence held: {reason}"),
+                    None => println!("Migration fence released."),
+                },
+                MigrationFenceAction::Release => {
+                    store.release_migration_fence()?;
+                    println!("Migration fence released.");
+                }
+            }
+        }
         Command::Doctor => {
             let report = run_doctor(&resolved)?;
             let has_failures = report.has_failures();
@@ -609,6 +648,15 @@ mod tests {
         assert!(help.contains("web"));
         assert!(help.contains("pr"));
         assert!(help.contains("config"));
+        assert!(help.contains("migration-fence"));
+        assert!(Cli::try_parse_from([
+            "harness-symphony",
+            "migration-fence",
+            "hold",
+            "--reason",
+            "ownership handoff",
+        ])
+        .is_ok());
         assert!(Cli::try_parse_from(["harness-symphony", "work", "board"]).is_ok());
         assert!(Cli::try_parse_from([
             "harness-symphony",

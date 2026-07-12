@@ -101,6 +101,7 @@ fn run_auto_mode_with_runner(
     validate_source(&options.source)?;
 
     let store = RunStateStore::new(config.state_db.clone());
+    store.ensure_migration_fence_released()?;
     let source = HarnessDbWorkSource::new(&config.harness_db);
     let mut summary = AutoRunSummary {
         source: source.name().to_owned(),
@@ -112,6 +113,7 @@ fn run_auto_mode_with_runner(
     };
 
     loop {
+        store.ensure_migration_fence_released()?;
         for candidate in source.poll()? {
             let queued =
                 store.enqueue_work(&candidate.story_id, &candidate.source, options.max_attempts)?;
@@ -320,6 +322,38 @@ mod tests {
             .unwrap();
         assert_eq!(queue.status, "completed");
         assert_eq!(queue.attempts, 1);
+    }
+
+    #[test]
+    fn auto_mode_refuses_to_poll_or_enqueue_while_migration_fence_is_held() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = config_for_root(temp_dir.path());
+        write_story_db(&config.harness_db, "US-FENCED");
+        let store = RunStateStore::new(config.state_db.clone());
+        store.hold_migration_fence("ownership handoff").unwrap();
+        let mut runner = FakeRunner::default();
+        let options = AutoRunOptions {
+            enabled: true,
+            source: "harness-db".to_owned(),
+            once: true,
+            max_runs: Some(1),
+            max_attempts: 1,
+            poll_interval_seconds: 0,
+            max_idle_cycles: Some(1),
+        };
+
+        let error = run_auto_mode_with_runner(&config, options, &mut runner).unwrap_err();
+
+        assert!(matches!(
+            error,
+            AutoError::State(StateError::MigrationFenceHeld(reason))
+                if reason == "ownership handoff"
+        ));
+        assert_eq!(runner.calls, 0);
+        assert!(matches!(
+            store.queue_record("US-FENCED"),
+            Err(StateError::RunNotFound(_))
+        ));
     }
 
     #[test]
